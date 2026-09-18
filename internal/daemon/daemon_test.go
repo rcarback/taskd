@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -268,10 +267,21 @@ func TestNewDoesNotReconcileWhenALiveDaemonOwnsTheRoot(t *testing.T) {
 
 // TestNewRefusesARootAnotherProcessHasLocked proves the root lock, and not
 // the dial probe, is what stops a second daemon: nothing is listening on this
-// root and no socket file exists at all, so the probe would let New straight
-// through. The assertion that no socket appeared is the point — it shows New
-// failed before clearStaleSocket, which is the ordering that closes the
-// unlink-versus-bind window.
+// root, so the probe would let New straight through.
+//
+// The sentinel file is what pins the ordering. An earlier version of this test
+// asserted that no socket file appeared, which proved nothing: net.Listen sets
+// unlink-on-close, so a New that bound the socket and only then failed on the
+// lock would remove it on the way out and leave that assertion green. Moving
+// lockRoot below net.Listen — which reopens the exact unlink-versus-bind
+// window the lock exists to close — passed.
+//
+// A file planted at the socket path distinguishes the two orders, because
+// clearStaleSocket removes whatever it finds there once its dial fails. If the
+// lock is taken first, New returns before clearStaleSocket runs and the
+// sentinel survives. If clearStaleSocket runs first, the sentinel is gone.
+// Its survival is therefore direct evidence of the order, not a side effect
+// that some other path can reproduce.
 func TestNewRefusesARootAnotherProcessHasLocked(t *testing.T) {
 	root := shortRoot(t)
 	if err := os.MkdirAll(paths.TasksDir(root), 0o700); err != nil {
@@ -287,14 +297,28 @@ func TestNewRefusesARootAnotherProcessHasLocked(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = held.Close() })
 
+	sock := paths.SocketPath(root)
+	if err := os.WriteFile(sock, []byte("sentinel"), 0o600); err != nil {
+		t.Fatalf("plant the sentinel at the socket path: %v", err)
+	}
+
 	if _, err := New(root, clock.System()); err == nil {
 		t.Fatal("New succeeded on a root another holder has locked, want an error")
+	} else if !strings.Contains(err.Error(), "already owns") {
+		t.Fatalf("error = %q, want the ownership error: the failure must come from the lock, not from listen", err)
 	} else if !strings.Contains(err.Error(), root) {
 		t.Fatalf("error = %q, want it to name the root %q", err, root)
 	}
 
-	if _, err := os.Stat(paths.SocketPath(root)); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("Stat(socket) = %v, want it never created: New must fail before it touches the socket", err)
+	got, err := os.ReadFile(sock) //nolint:gosec // sock is paths.SocketPath of this test's own temp root, not untrusted input
+	if err != nil {
+		t.Fatalf("the sentinel at the socket path is gone (%v): New reached clearStaleSocket before it took the root lock, which reopens the unlink-versus-bind window", err)
+	}
+	if string(got) != "sentinel" {
+		t.Fatalf("sentinel = %q, want it untouched: New must fail before it touches the socket path", got)
+	}
+	if err := os.Remove(sock); err != nil {
+		t.Fatalf("remove the sentinel: %v", err)
 	}
 
 	// Releasing the lock hands the root back, with no reaper and no
