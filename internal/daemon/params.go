@@ -8,6 +8,12 @@ import "time"
 //
 // PTY is a pointer so an omitted field means "use the default", which is
 // true, rather than false.
+//
+// KillAfterS is nil for "no cap": the task runs until it ends on its own or
+// a client signals it. A non-nil value must be positive; a caller sending 0
+// or a negative number gets an error naming the field rather than a cap
+// that fires on its very next tick, which would kill the task before the
+// caller had any real chance to observe it running.
 type StartParams struct {
 	Command     string   `json:"command"`
 	Args        []string `json:"args,omitempty"`

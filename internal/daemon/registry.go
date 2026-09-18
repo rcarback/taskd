@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/rcarback/taskd/internal/output"
 	"github.com/rcarback/taskd/internal/record"
@@ -18,9 +19,9 @@ import (
 // read LiveTask or LiveStore concurrently with a reaper clearing them at
 // Finish, and that is a real data race, not just a stale read, if either
 // side touches the field without the lock. Record, SetState, Live,
-// LiveTask, LiveStore, Dir, Done, AttachStore, AttachTask, RequestKill, and
-// Finish are the entire surface for touching an Entry from outside this
-// file.
+// LiveTask, LiveStore, Dir, Done, AttachStore, AttachTask, RequestKill,
+// Finish, and Fail are the entire surface for touching an Entry from
+// outside this file.
 //
 // LiveTask and LiveStore are nil for a task that has ended: the daemon
 // keeps the record so status and reads still answer, and drops the live
@@ -28,7 +29,9 @@ import (
 //
 // done closes when the task reaches a terminal state. Callers use Done.
 // killRequested records that taskd asked for the kill, so the waiter can
-// report killed rather than signaled.
+// report killed rather than signaled. terminal is set by whichever of
+// Finish or Fail runs first, and makes the other (or a second call to the
+// same one) a no-op instead of a double close of done.
 type Entry struct {
 	mu    sync.Mutex
 	rec   record.Record
@@ -38,6 +41,7 @@ type Entry struct {
 
 	done          chan struct{}
 	killRequested bool
+	terminal      bool
 }
 
 // NewEntry returns an entry whose Done channel is ready to use.
@@ -140,9 +144,17 @@ func (e *Entry) RequestKill() {
 //
 // The caller reads State before ExitCode or Signal, so Finish only fills in
 // whichever one res.State makes meaningful.
+//
+// A second call, or a call after Fail already ran, is a no-op that returns
+// the record as it already stands: only the first terminal write may close
+// done, and only one of Finish or Fail is ever that first write.
 func (e *Entry) Finish(res supervisor.Result, written, retained int64) record.Record {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.terminal {
+		return e.rec
+	}
+	e.terminal = true
 
 	e.rec.State = res.State
 	switch res.State {
@@ -173,6 +185,32 @@ func (e *Entry) Finish(res supervisor.Result, written, retained int64) record.Re
 	// Clear both live handles under this lock, and signal Done, so a
 	// connection goroutine reading through LiveTask or LiveStore can never
 	// observe a state this function is still in the middle of updating.
+	e.task = nil
+	e.store = nil
+	close(e.done)
+	return e.rec
+}
+
+// Fail records that the task never started: supervisor.Start itself
+// returned an error, so there is no supervisor.Result to build a record
+// from the usual way. Fail gives that record the same terminal shape Finish
+// gives every other outcome — a state, an EndedAt, and no live handles —
+// rather than a hand-rolled one that could drift from Finish's over time.
+//
+// Fail shares Finish's terminal guard: whichever of the two runs first wins,
+// and the other becomes a no-op. A task that never started has no live
+// handles to begin with, so clearing them here is for symmetry with Finish,
+// not because either could be non-nil.
+func (e *Entry) Fail(ended time.Time) record.Record {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.terminal {
+		return e.rec
+	}
+	e.terminal = true
+
+	e.rec.State = supervisor.StateFailed
+	e.rec.EndedAt = &ended
 	e.task = nil
 	e.store = nil
 	close(e.done)

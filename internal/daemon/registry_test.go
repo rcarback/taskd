@@ -150,3 +150,71 @@ func TestEntryFinishRemapsAKillRequestedSignalToKilled(t *testing.T) {
 		t.Fatalf("Exit = %v, want nil for a killed task", rec.Exit)
 	}
 }
+
+func TestEntryFailRecordsATerminalFailureAndClosesDone(t *testing.T) {
+	e := NewEntry(record.Record{ID: "a", State: supervisor.StateRunning}, "")
+	e.AttachTask(&supervisor.Task{})
+	e.AttachStore(&output.Store{})
+
+	rec := e.Fail(time.Unix(42, 0))
+
+	if rec.State != supervisor.StateFailed {
+		t.Fatalf("State = %q, want failed", rec.State)
+	}
+	if rec.EndedAt == nil || !rec.EndedAt.Equal(time.Unix(42, 0)) {
+		t.Fatalf("EndedAt = %v, want %v", rec.EndedAt, time.Unix(42, 0))
+	}
+	if rec.Exit != nil || rec.Signal != "" {
+		t.Fatalf("Exit, Signal = %v, %q, want both unset for a launch that never produced a process", rec.Exit, rec.Signal)
+	}
+	if e.LiveTask() != nil || e.LiveStore() != nil {
+		t.Fatal("LiveTask() or LiveStore() is non-nil after Fail")
+	}
+	select {
+	case <-e.Done():
+	default:
+		t.Fatal("Done() has not closed after Fail")
+	}
+}
+
+func TestEntryFinishIsIdempotent(t *testing.T) {
+	e := NewEntry(record.Record{ID: "a", State: supervisor.StateRunning}, "")
+
+	first := e.Finish(supervisor.Result{State: supervisor.StateExited, ExitCode: 3, Ended: time.Unix(1, 0)}, 10, 10)
+
+	// A second terminal write must not panic on a double close(done) and
+	// must not overwrite the record a first, different result already set.
+	second := e.Finish(supervisor.Result{State: supervisor.StateFailed, Ended: time.Unix(2, 0)}, 0, 0)
+
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("second Finish returned %+v, want the first result %+v unchanged", second, first)
+	}
+	if got := e.Record(); !reflect.DeepEqual(got, first) {
+		t.Fatalf("Record() = %+v, want the first Finish's result %+v", got, first)
+	}
+}
+
+func TestEntryFailAfterFinishIsANoOp(t *testing.T) {
+	e := NewEntry(record.Record{ID: "a", State: supervisor.StateRunning}, "")
+
+	finished := e.Finish(supervisor.Result{State: supervisor.StateExited, ExitCode: 0, Ended: time.Unix(1, 0)}, 0, 0)
+	failed := e.Fail(time.Unix(2, 0))
+
+	if !reflect.DeepEqual(finished, failed) {
+		t.Fatalf("Fail after Finish returned %+v, want Finish's own result %+v unchanged", failed, finished)
+	}
+}
+
+func TestEntryFinishAfterFailIsANoOp(t *testing.T) {
+	e := NewEntry(record.Record{ID: "a", State: supervisor.StateRunning}, "")
+
+	failed := e.Fail(time.Unix(1, 0))
+	finished := e.Finish(supervisor.Result{State: supervisor.StateExited, ExitCode: 0, Ended: time.Unix(2, 0)}, 5, 5)
+
+	if !reflect.DeepEqual(failed, finished) {
+		t.Fatalf("Finish after Fail returned %+v, want Fail's own result %+v unchanged", finished, failed)
+	}
+	if finished.State != supervisor.StateFailed {
+		t.Fatalf("State = %q, want failed: Fail ran first and Finish must not overwrite it", finished.State)
+	}
+}
