@@ -4,13 +4,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/rcarback/taskd/internal/clock"
+	"github.com/rcarback/taskd/internal/daemon"
 	"github.com/rcarback/taskd/internal/output"
 	"github.com/rcarback/taskd/internal/paths"
 	"github.com/rcarback/taskd/internal/supervisor"
@@ -26,11 +30,47 @@ func main() {
 // main keeps no logic of its own, so tests can drive the same routing without
 // calling os.Exit.
 func dispatch(args []string, stdout io.Writer) int {
-	if len(args) == 0 || args[0] != "run" {
-		_, _ = fmt.Fprintln(stdout, "usage: taskd run [flags] -- COMMAND [ARGS...]")
+	if len(args) == 0 {
+		_, _ = fmt.Fprintln(stdout, usage)
 		return 2
 	}
-	return run(args[1:], stdout)
+	switch args[0] {
+	case "run":
+		return run(args[1:], stdout)
+	case "serve":
+		return serve(args[1:], stdout)
+	default:
+		_, _ = fmt.Fprintln(stdout, usage)
+		return 2
+	}
+}
+
+const usage = "usage: taskd run [flags] -- COMMAND [ARGS...]\n       taskd serve [--root DIR]"
+
+// serve runs the daemon in the foreground until a signal ends it.
+func serve(args []string, stdout io.Writer) int {
+	fs := flag.NewFlagSet("taskd serve", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	root := fs.String("root", paths.Root(), "directory that holds task records")
+	if err := fs.Parse(args); err != nil {
+		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
+		return 2
+	}
+
+	d, err := daemon.New(*root, clock.System())
+	if err != nil {
+		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
+		return 1
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := d.Serve(ctx); err != nil {
+		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // run supervises one command in the foreground and returns its exit code.
