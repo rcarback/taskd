@@ -69,9 +69,18 @@ func newSession(t *testing.T) *mcp.ClientSession {
 // No t.Parallel in any test that calls this: the call starts a daemon.
 func newSessionFor(t *testing.T, h mcpadapter.Harness) *mcp.ClientSession {
 	t.Helper()
+	return newSessionOnRoot(t, shortRoot(t), h)
+}
+
+// newSessionOnRoot is newSessionFor with the root supplied by the caller,
+// for a test that must assert on the root the server, and so the emitted
+// task_wait command, names.
+//
+// No t.Parallel in any test that calls this: the call starts a daemon.
+func newSessionOnRoot(t *testing.T, root string, h mcpadapter.Harness) *mcp.ClientSession {
+	t.Helper()
 	ctx := context.Background()
 
-	root := shortRoot(t)
 	startDaemon(t, root)
 
 	srv := mcpadapter.New(root, h)

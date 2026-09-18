@@ -81,6 +81,21 @@ error for the operator, and names the harness in the text, `harness: codex`.
 Neither happens. The warning reaches only the tool result that answers the
 call, and it never mentions `StartParams.Harness`.
 
+## `task_wait`'s `until` cannot express a match condition
+
+The MCP adapter's `task_wait` takes `until` as the comma-separated string
+`taskd wait --until` accepts, not the object form `watch.Condition` carries
+over the socket. `watch.ParseUntil` rejects `match:REGEX` on that string
+deliberately, because a regular expression may contain a comma and this
+spelling splits on commas. Waking on matched output is therefore
+unavailable through `task_wait`, even though the daemon supports it through
+the socket API's object form.
+
+`skills/task-monitor/SKILL.md` teaches the object form,
+`until: [{type: "match", pattern: "error:"}]`, which is the socket API
+spelling, not the one `task_wait` accepts. An agent that follows that skill
+through the MCP adapter would hand it a string that fails to parse.
+
 ## `StartParams.Harness` is recorded and never read
 
 `task_start` accepts `harness` and the daemon stores it on the record. No
