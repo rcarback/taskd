@@ -60,6 +60,9 @@ func TestStripReportsAnIncompleteTail(t *testing.T) {
 		{"a doubled bare escape", "\x1b\x1b", "", 2},
 		{"a bare escape before a truncated CSI", "ok\x1b\x1b[31", "ok", 5},
 		{"a complete CSI followed by a trailing bare escape", "z\x1b[31m\x1b", "z", 1},
+		{"a bare escape immediately before a complete CSI", "\x1b\x1b[31m", "", 0},
+		{"a stray escape next to a byte outside every class", "a\x1b\x80b", "a\x80b", 0},
+		{"a stray escape does not disturb multibyte text", "café\x1b\x1b[31m", "café", 0},
 	}
 
 	for _, c := range cases {

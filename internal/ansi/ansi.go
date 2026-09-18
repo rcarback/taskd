@@ -3,7 +3,10 @@
 // Package ansi removes terminal escape sequences from captured output.
 package ansi
 
-import "regexp"
+import (
+	"bytes"
+	"regexp"
+)
 
 // escape matches, in order: CSI sequences, OSC sequences ended by BEL or by
 // the string terminator, and two-byte escape sequences. The pattern operates
@@ -33,10 +36,20 @@ var incomplete = regexp.MustCompile(
 		`|\x1b*\x1b\][^\x07\x1b]*\x1b?$`,
 )
 
+// escByte is the raw ESC byte, dropped from clean after escape and the
+// pending-tail trim have each had a chance to account for it. See Strip.
+var escByte = []byte{0x1b}
+
 // Strip removes terminal escape sequences from b.
 //
 // clean is a fresh copy of b without the sequences it could classify. It
-// never aliases b.
+// never aliases b. A raw ESC byte can still reach this point unclassified —
+// for example one sitting directly against a complete sequence with no gap,
+// as ESC ESC [31m does, or one followed by a byte outside every final-byte
+// class. Such a byte begins no sequence this buffer continues, now or in a
+// later chunk, so it carries no information and clean drops it rather than
+// emit it literally. ESC never appears inside a multi-byte UTF-8 sequence,
+// so dropping it cannot corrupt one.
 //
 // pendingLen counts trailing bytes of b that begin a sequence b does not
 // finish. Those bytes are not in clean. A caller reading a stream in chunks
@@ -48,5 +61,6 @@ func Strip(b []byte) (clean []byte, pendingLen int) {
 		pendingLen = len(b) - loc[0]
 		b = b[:loc[0]]
 	}
-	return escape.ReplaceAll(b, nil), pendingLen
+	clean = escape.ReplaceAll(b, nil)
+	return bytes.ReplaceAll(clean, escByte, nil), pendingLen
 }
