@@ -57,18 +57,24 @@ func startDaemon(t *testing.T, root string) {
 	})
 }
 
-// newSession connects an in-memory client to a server on a fresh root, with
-// a real daemon running behind it.
+// newSession connects an in-memory client to a generic-harness server.
+func newSession(t *testing.T) *mcp.ClientSession {
+	t.Helper()
+	return newSessionFor(t, mcpadapter.HarnessGeneric)
+}
+
+// newSessionFor connects an in-memory client to a server for one harness,
+// on a fresh root, with a real daemon running behind it.
 //
 // No t.Parallel in any test that calls this: the call starts a daemon.
-func newSession(t *testing.T) *mcp.ClientSession {
+func newSessionFor(t *testing.T, h mcpadapter.Harness) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
 	root := shortRoot(t)
 	startDaemon(t, root)
 
-	srv := mcpadapter.New(root, mcpadapter.HarnessGeneric)
+	srv := mcpadapter.New(root, h)
 	st, ct := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(ctx, st, nil)
 	if err != nil {

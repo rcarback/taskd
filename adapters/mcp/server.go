@@ -69,6 +69,7 @@ func New(root string, h Harness) *mcp.Server {
 	s.addSearch(srv)
 	s.addSignal(srv)
 	s.addWrite(srv)
+	s.addWait(srv)
 	return srv
 }
 
