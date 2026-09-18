@@ -3,15 +3,18 @@
 package daemon
 
 import (
+	"syscall"
 	"testing"
+	"time"
 
+	"github.com/rcarback/taskd/internal/output"
 	"github.com/rcarback/taskd/internal/record"
 	"github.com/rcarback/taskd/internal/supervisor"
 )
 
 func TestRegistryFindsATaskByIDAndByName(t *testing.T) {
 	r := NewRegistry()
-	e := &Entry{Rec: record.Record{ID: "abc", Name: "build", State: supervisor.StateRunning}}
+	e := &Entry{rec: record.Record{ID: "abc", Name: "build", State: supervisor.StateRunning}}
 	if err := r.Add(e); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -28,10 +31,10 @@ func TestRegistryFindsATaskByIDAndByName(t *testing.T) {
 
 func TestRegistryRejectsADuplicateLiveName(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Add(&Entry{Rec: record.Record{ID: "a", Name: "build", State: supervisor.StateRunning}}); err != nil {
+	if err := r.Add(&Entry{rec: record.Record{ID: "a", Name: "build", State: supervisor.StateRunning}}); err != nil {
 		t.Fatalf("first Add: %v", err)
 	}
-	err := r.Add(&Entry{Rec: record.Record{ID: "b", Name: "build", State: supervisor.StateRunning}})
+	err := r.Add(&Entry{rec: record.Record{ID: "b", Name: "build", State: supervisor.StateRunning}})
 	if err == nil {
 		t.Fatal("Add accepted a duplicate name while the first task is running")
 	}
@@ -39,18 +42,18 @@ func TestRegistryRejectsADuplicateLiveName(t *testing.T) {
 
 func TestRegistryFreesANameWhenTheTaskEnds(t *testing.T) {
 	r := NewRegistry()
-	first := &Entry{Rec: record.Record{ID: "a", Name: "build", State: supervisor.StateRunning}}
+	first := &Entry{rec: record.Record{ID: "a", Name: "build", State: supervisor.StateRunning}}
 	if err := r.Add(first); err != nil {
 		t.Fatalf("first Add: %v", err)
 	}
 
 	first.SetState(supervisor.StateExited)
 
-	if err := r.Add(&Entry{Rec: record.Record{ID: "b", Name: "build", State: supervisor.StateRunning}}); err != nil {
+	if err := r.Add(&Entry{rec: record.Record{ID: "b", Name: "build", State: supervisor.StateRunning}}); err != nil {
 		t.Fatalf("Add after the first task ended: %v", err)
 	}
 	got, ok := r.Get("build")
-	if !ok || got.Rec.ID != "b" {
+	if !ok || got.Record().ID != "b" {
 		t.Fatal("the name did not resolve to the new task")
 	}
 	if _, ok := r.Get("a"); !ok {
@@ -61,11 +64,61 @@ func TestRegistryFreesANameWhenTheTaskEnds(t *testing.T) {
 func TestRegistryAnAnonymousTaskNeedsNoName(t *testing.T) {
 	r := NewRegistry()
 	for _, id := range []string{"a", "b"} {
-		if err := r.Add(&Entry{Rec: record.Record{ID: id, State: supervisor.StateRunning}}); err != nil {
+		if err := r.Add(&Entry{rec: record.Record{ID: id, State: supervisor.StateRunning}}); err != nil {
 			t.Fatalf("Add %s: %v", id, err)
 		}
 	}
 	if n := len(r.List()); n != 2 {
 		t.Fatalf("List returned %d entries, want 2", n)
+	}
+}
+
+func TestEntryFinishRecordsTerminalStateAndClearsLiveHandles(t *testing.T) {
+	cases := []struct {
+		name string
+		res  supervisor.Result
+	}{
+		{"exited", supervisor.Result{State: supervisor.StateExited, ExitCode: 7, Ended: time.Unix(100, 0)}},
+		{"signaled", supervisor.Result{State: supervisor.StateSignaled, Signal: syscall.SIGKILL, Ended: time.Unix(200, 0)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Entry{rec: record.Record{ID: "a", State: supervisor.StateRunning}}
+			e.task = &supervisor.Task{}
+			e.store = &output.Store{}
+
+			e.Finish(tc.res)
+
+			if e.LiveTask() != nil {
+				t.Fatal("LiveTask() is non-nil after Finish")
+			}
+			if e.LiveStore() != nil {
+				t.Fatal("LiveStore() is non-nil after Finish")
+			}
+
+			rec := e.Record()
+			if rec.State != tc.res.State {
+				t.Fatalf("State = %q, want %q", rec.State, tc.res.State)
+			}
+			if rec.EndedAt == nil || !rec.EndedAt.Equal(tc.res.Ended) {
+				t.Fatalf("EndedAt = %v, want %v", rec.EndedAt, tc.res.Ended)
+			}
+			switch tc.res.State {
+			case supervisor.StateExited:
+				if rec.Exit == nil || *rec.Exit != tc.res.ExitCode {
+					t.Fatalf("Exit = %v, want %d", rec.Exit, tc.res.ExitCode)
+				}
+				if rec.Signal != "" {
+					t.Fatalf("Signal = %q, want empty for an exited task", rec.Signal)
+				}
+			case supervisor.StateSignaled:
+				if rec.Signal != tc.res.Signal.String() {
+					t.Fatalf("Signal = %q, want %q", rec.Signal, tc.res.Signal.String())
+				}
+				if rec.Exit != nil {
+					t.Fatalf("Exit = %v, want nil for a signaled task", rec.Exit)
+				}
+			}
+		})
 	}
 }
