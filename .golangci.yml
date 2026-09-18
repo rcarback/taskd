@@ -21,8 +21,3 @@ linters:
       forbid:
         - pattern: ^time\.Sleep$
           msg: no time.Sleep — use the fake clock (internal/clock) instead
-  exclusions:
-    rules:
-      - path: internal/client/client.go
-        linters:
-          - forbidigo

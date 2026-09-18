@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,6 +76,39 @@ func TestCallReachesARunningDaemon(t *testing.T) {
 	}
 	if !res.OK {
 		t.Fatalf("OK = false, error = %q", res.Error)
+	}
+}
+
+// TestDialDoesNotUnlinkASocketFailingWithANonStaleError guards against
+// Dial treating every dial failure as "no daemon here". A socket that a live
+// daemon is listening on, but that this client cannot reach for some other
+// reason (permission denied, here), must not be unlinked: doing so would
+// strand that daemon on an orphaned inode, unreachable to anyone, and spawn
+// a second daemon on top of it.
+func TestDialDoesNotUnlinkASocketFailingWithANonStaleError(t *testing.T) {
+	root := shortRoot(t)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	sock := paths.SocketPath(root)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	// A live listener that no one may connect to: every dial against it
+	// fails with permission denied, not with the "nothing is listening"
+	// error that means a socket is genuinely stale.
+	if err := os.Chmod(sock, 0o000); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	if _, err := Dial(root); err == nil {
+		t.Fatal("Dial succeeded against a permission-denied socket")
+	}
+	if _, err := os.Stat(sock); err != nil {
+		t.Fatalf("socket was removed on a non-stale dial error: %v", err)
 	}
 }
 

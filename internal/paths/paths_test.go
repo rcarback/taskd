@@ -32,6 +32,7 @@ func TestDerivedPathsSitUnderTheRoot(t *testing.T) {
 		"socket": SocketPath(root),
 		"lock":   LockPath(root),
 		"tasks":  TasksDir(root),
+		"log":    DaemonLogPath(root),
 	} {
 		if !strings.HasPrefix(got, root+string(filepath.Separator)) {
 			t.Fatalf("%s path %q is not under %q", name, got, root)

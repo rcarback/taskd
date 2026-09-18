@@ -33,5 +33,10 @@ func SocketPath(root string) string { return filepath.Join(root, "taskd.sock") }
 // LockPath reports the file a client locks before it starts a daemon.
 func LockPath(root string) string { return filepath.Join(root, "daemon.lock") }
 
+// DaemonLogPath reports the file a client-spawned daemon writes its stdout
+// and stderr to, so a daemon that fails during startup leaves a diagnostic
+// behind instead of failing silently.
+func DaemonLogPath(root string) string { return filepath.Join(root, "daemon.log") }
+
 // TasksDir reports the directory that holds one subdirectory per task.
 func TasksDir(root string) string { return filepath.Join(root, "tasks") }
