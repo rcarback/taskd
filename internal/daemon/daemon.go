@@ -346,14 +346,19 @@ func (d *Daemon) serveConn(ctx context.Context, conn net.Conn) {
 	}()
 
 	res := d.safeAnswer(reqCtx, req)
-	if reqCtx.Err() != nil {
-		// The peer hung up while the handler ran, or the daemon started
-		// shutting down: either way nobody is left to read a response, and
-		// conn may already be half or fully closed. Writing one here could
-		// only fail, the same as any other write to a hung-up client (see
-		// the comment on that failure path below) — skip it instead of
-		// building a response nobody will see.
+	select {
+	case <-hungUp:
+		// The peer hung up while the handler ran: nobody is left to read a
+		// response, and conn may already be half or fully closed. Writing one
+		// here could only fail, the same as any other write to a hung-up
+		// client (see the comment on that failure path below) — skip it
+		// instead of building a response nobody will see. The deferred
+		// SetReadDeadline below has not run yet, so a ready hungUp here means
+		// the peer is gone and nothing else — not that the daemon itself
+		// started shutting down, which also cancels reqCtx but leaves a
+		// connected client waiting for its answer.
 		return
+	default:
 	}
 	if err := proto.WriteMessage(conn, res); err != nil {
 		_ = proto.WriteMessage(conn, proto.Response{

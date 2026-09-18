@@ -127,11 +127,14 @@ func TestWaitRejectsNoIDs(t *testing.T) {
 	}
 }
 
-// TestWaitRejectsATaskWithNoTap covers the entry-with-no-tap rejection.
-// Nothing in this plan yet loads a reconciled record into the registry, so
-// there is no way to reach this path through the public verb API; this
-// builds the same shape by hand — an Entry the registry knows about, with
-// no tap ever attached — to stand in for it.
+// TestWaitRejectsATaskWithNoTap covers the nil-tap rejection for a task
+// reconciled from a previous daemon's record. Nothing in this plan yet loads
+// a reconciled record into the registry, so there is no way to reach this
+// exact shape through the public verb API; this builds it by hand — an
+// Entry the registry knows about, with no tap ever attached and a
+// non-failed terminal state — to stand in for it. A failed launch reaches a
+// nil tap through the public API instead, and gets a different message; see
+// TestWaitRejectsAFailedLaunch.
 func TestWaitRejectsATaskWithNoTap(t *testing.T) {
 	d := newDaemon(t)
 
@@ -152,6 +155,32 @@ func TestWaitRejectsATaskWithNoTap(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "task_status") {
 		t.Errorf("error = %q, want it to point at task_status", err)
+	}
+}
+
+// TestWaitRejectsAFailedLaunch covers the nil-tap rejection for the one
+// shape that reaches it through the public verb API today: a task_start
+// call whose supervisor.Start failed. The entry stays in the registry with
+// state failed and no tap, discoverable through task_status, and task_wait
+// must say the task never started rather than blaming a daemon restart.
+func TestWaitRejectsAFailedLaunch(t *testing.T) {
+	d := newDaemon(t)
+
+	if _, err := callVerb(t, d, "task_start", StartParams{
+		Command: "definitely-not-a-real-command-xyz", Name: "willfail",
+	}); err == nil {
+		t.Fatal("task_start succeeded for a command that cannot launch")
+	}
+
+	_, err := callVerb(t, d, "task_wait", WaitParams{IDs: []string{"willfail"}})
+	if err == nil {
+		t.Fatal("task_wait accepted a task that never started")
+	}
+	if !strings.Contains(err.Error(), "willfail") {
+		t.Errorf("error = %q, want it to name the task", err)
+	}
+	if !strings.Contains(err.Error(), "never started") {
+		t.Errorf("error = %q, want it to say the task never started", err)
 	}
 }
 

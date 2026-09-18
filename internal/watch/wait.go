@@ -34,7 +34,11 @@ type Source interface {
 	// final output against its exit relies on that ordering to recover a
 	// match found on the last line rather than losing it to the task
 	// ending. An implementation that closes Done before its tap has
-	// drained the task's output breaks that guarantee silently.
+	// drained the task's output breaks that guarantee silently. The
+	// daemon's implementation holds this guarantee only up to the pty
+	// drain grace (supervisor.ptyDrainGrace): a grandchild that holds the
+	// pty slave open past the grace can still be copying a final line into
+	// the tap after Done closes.
 	Done() <-chan struct{}
 }
 

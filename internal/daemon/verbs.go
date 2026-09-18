@@ -89,6 +89,14 @@ func (d *Daemon) wait(ctx context.Context, p WaitParams) (WaitResult, error) {
 			return WaitResult{}, fmt.Errorf("daemon: no task %q", id)
 		}
 		if e.Tap() == nil {
+			if e.Record().State == supervisor.StateFailed {
+				// The only path that reaches a nil tap today:
+				// supervisor.Start itself failed, and Fail recorded a
+				// terminal state with no tap ever attached. The task
+				// never ran, so there is no output to wait on.
+				return WaitResult{}, fmt.Errorf(
+					"daemon: task %q never started; read task_status instead", id)
+			}
 			// A task reconciled from a previous daemon's record has no
 			// live tap, so nothing can observe its output. Exit is the
 			// only condition that could still fire, and the record
@@ -119,7 +127,10 @@ func (d *Daemon) wait(ctx context.Context, p WaitParams) (WaitResult, error) {
 	}
 	blocked := int(d.Clk.Now().Sub(started).Seconds())
 
-	fired, _ := d.Reg.Get(e.TaskID)
+	fired, ok := d.Reg.Get(e.TaskID)
+	if !ok {
+		return WaitResult{}, fmt.Errorf("daemon: task_wait: task %q vanished from the registry", e.TaskID)
+	}
 	rec := fired.Record()
 
 	return WaitResult{
@@ -422,9 +433,10 @@ func (d *Daemon) status(_ context.Context, p StatusParams) (StatusResult, error)
 // statusOf converts an entry to its terse form.
 func statusOf(e *Entry) StatusEntry {
 	r := e.Record()
-	// Never nil: a task this daemon did not start (reconciled from a
-	// previous daemon's record) has no tap, and a client iterating patterns
-	// still wants [] rather than JSON null.
+	// Never nil: a task with no live tap — because it failed to launch, or
+	// because it was reconciled from a previous daemon's record — has
+	// nothing to report patterns from, and a client iterating patterns still
+	// wants [] rather than JSON null.
 	pats := []watch.PatternState{}
 	if tap := e.Tap(); tap != nil {
 		pats = tap.Stats()
