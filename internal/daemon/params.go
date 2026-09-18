@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rcarback/taskd/internal/proto"
+	"github.com/rcarback/taskd/internal/watch"
 )
 
 // StartParams is task_start's input.
@@ -29,6 +30,11 @@ type StartParams struct {
 	Harness     string   `json:"harness,omitempty"`
 	Session     string   `json:"session,omitempty"`
 	MaxOutput   int64    `json:"max_output,omitempty"`
+
+	// Patterns are evaluated against every complete line of output. They
+	// are what keeps task_status cheap: a record pattern turns a log into
+	// a counter and one line.
+	Patterns []watch.Pattern `json:"patterns,omitempty"`
 }
 
 // StartResult is task_start's output.
@@ -61,6 +67,10 @@ type StatusEntry struct {
 	StartedAt time.Time  `json:"started_at"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	OutputErr string     `json:"output_err,omitempty"`
+
+	// Patterns reports each pattern's counter and last hit. It is never
+	// nil, so a client can iterate it without testing for JSON null.
+	Patterns []watch.PatternState `json:"patterns"`
 }
 
 // StatusResult is task_status's output.

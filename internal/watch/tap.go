@@ -143,7 +143,12 @@ func (t *Tap) observe(p []byte) {
 		if i < 0 {
 			break
 		}
-		line := string(t.partial[:i])
+		// A PTY task writes CRLF, so the byte before the newline this just
+		// found is a trailing '\r' that belongs to the line ending, not the
+		// line. Left in, it would reach every pattern, matcher, and counter,
+		// making a trailing-anchored regex never match and every reported
+		// line end in a character its caller did not write.
+		line := string(bytes.TrimSuffix(t.partial[:i], []byte("\r")))
 		t.partial = t.partial[i+1:]
 		t.lines++
 		t.applyPatterns(line)

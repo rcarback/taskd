@@ -19,6 +19,7 @@ import (
 	"github.com/rcarback/taskd/internal/record"
 	"github.com/rcarback/taskd/internal/supervisor"
 	"github.com/rcarback/taskd/internal/taskdir"
+	"github.com/rcarback/taskd/internal/watch"
 )
 
 // Register installs every verb handler this plan implements.
@@ -83,6 +84,14 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 			outputCap, defaultOnOutputCap)
 	}
 
+	// Compiled before any resource exists for this task, so an uncompilable
+	// pattern fails fast with nothing to clean up: no directory, no store, no
+	// registry entry left orphaned and never reaching a terminal state.
+	pats, err := watch.CompilePatterns(p.Patterns)
+	if err != nil {
+		return StartResult{}, err
+	}
+
 	dir, id, err := taskdir.New(d.Root)
 	if err != nil {
 		return StartResult{}, err
@@ -119,6 +128,8 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 		return StartResult{}, err
 	}
 
+	tap := watch.NewTap(storeWriter{store}, d.Clk, pats)
+
 	// A non-PTY task gets no stdin pipe, so os/exec hands it /dev/null and a
 	// task that reads standard input sees end of input at once. Opting it
 	// into Spec.Stdin instead would give every such task a pipe that nothing
@@ -130,7 +141,7 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 	task, err := supervisor.Start(supervisor.Spec{
 		Command: p.Command, Args: p.Args, Dir: p.Cwd,
 		Env: os.Environ(), PTY: usePTY,
-	}, storeWriter{store}, d.Clk)
+	}, tap, d.Clk)
 	if err != nil {
 		_ = store.Close()
 		// Fail gives this record the same terminal shape Finish gives every
@@ -143,6 +154,8 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 		return StartResult{}, err
 	}
 	e.AttachTask(task)
+	e.AttachTap(tap)
+	go d.awaitKillPattern(e, tap)
 
 	// Best-effort: the process is already running at this point, so a
 	// failure to persist its initial metadata must not stop it from being
@@ -195,6 +208,27 @@ func (d *Daemon) enforceCap(e *Entry, seconds int) {
 		task := e.LiveTask()
 		if task == nil {
 			return // it ended while the timer was firing
+		}
+		e.RequestKill()
+		_ = task.Signal(syscall.SIGKILL)
+	}
+}
+
+// awaitKillPattern ends the task when a kill pattern matches.
+//
+// It mirrors enforceCap: both end a task the client did not explicitly
+// signal, and both run only because the caller opted in — enforceCap
+// through kill_after_s, this through on_match: "kill".
+func (d *Daemon) awaitKillPattern(e *Entry, tap *watch.Tap) {
+	select {
+	case <-e.Done():
+	case _, ok := <-tap.Killed():
+		if !ok {
+			return // the channel closed without a match
+		}
+		task := e.LiveTask()
+		if task == nil {
+			return // it ended while the pattern was matching
 		}
 		e.RequestKill()
 		_ = task.Signal(syscall.SIGKILL)
@@ -300,11 +334,19 @@ func (d *Daemon) status(p StatusParams) (StatusResult, error) {
 // statusOf converts an entry to its terse form.
 func statusOf(e *Entry) StatusEntry {
 	r := e.Record()
+	// Never nil: a task this daemon did not start (reconciled from a
+	// previous daemon's record) has no tap, and a client iterating patterns
+	// still wants [] rather than JSON null.
+	pats := []watch.PatternState{}
+	if tap := e.Tap(); tap != nil {
+		pats = tap.Stats()
+	}
 	return StatusEntry{
 		ID: r.ID, Name: r.Name, State: string(r.State), Command: r.Command,
 		Exit: r.Exit, Signal: r.Signal, Session: r.Session,
 		Written: r.Written, Retained: r.Retained,
 		StartedAt: r.StartedAt, EndedAt: r.EndedAt, OutputErr: r.OutputErr,
+		Patterns: pats,
 	}
 }
 
