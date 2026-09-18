@@ -2582,8 +2582,11 @@ func (d *Daemon) status(p StatusParams) (StatusResult, error) {
 		return StatusResult{Tasks: out}, nil
 	}
 
-	var out []StatusEntry
-	for _, e := range d.Reg.List() {
+	entries := d.Reg.List()
+	// Non-nil and possibly empty: a nil slice marshals to JSON null, and a
+	// caller iterating "tasks" wants [] when nothing matched.
+	out := make([]StatusEntry, 0, len(entries))
+	for _, e := range entries {
 		rec := e.Record()
 		if !p.All && p.Session != "" && rec.Session != p.Session {
 			continue
@@ -3087,7 +3090,9 @@ func (d *Daemon) search(p SearchParams) (SearchResult, error) {
 		maxMatches = defaultMaxMatches
 	}
 
-	var out []Match
+	// Non-nil and possibly empty: a nil slice marshals to JSON null, and a
+	// caller iterating "matches" wants [] when nothing matched.
+	out := make([]Match, 0)
 	more := false
 	for i, line := range lines {
 		if !re.MatchString(line) {
