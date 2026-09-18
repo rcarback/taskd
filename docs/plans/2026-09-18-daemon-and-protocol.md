@@ -312,8 +312,8 @@ func TestStripReportsAnIncompleteTail(t *testing.T) {
 	}{
 		{"a lone trailing escape", "ok\x1b", "ok", 1},
 		{"a truncated CSI", "ok\x1b[31", "ok", 4},
-		{"a truncated OSC", "ok\x1b]0;title", "ok", 10},
-		{"a truncated OSC on its terminator", "ok\x1b]0;t\x1b", "ok", 7},
+		{"a truncated OSC", "ok\x1b]0;title", "ok", 9},
+		{"a truncated OSC on its terminator", "ok\x1b]0;t\x1b", "ok", 6},
 		{"a complete OSC is not pending", "ok\x1b]0;t\x07done", "okdone", 0},
 		{"a complete CSI is not pending", "ok\x1b[31mdone", "okdone", 0},
 		{"no escapes at all", "plain text", "plain text", 0},
@@ -365,8 +365,8 @@ func TestStripDoesNotTreatABareCloseBracketAsATwoByteEscape(t *testing.T) {
 	if len(clean) != 0 {
 		t.Fatalf("clean = %q, want empty: the whole buffer is an unfinished OSC", clean)
 	}
-	if pending != 8 {
-		t.Fatalf("pendingLen = %d, want 8", pending)
+	if pending != 9 {
+		t.Fatalf("pendingLen = %d, want 9", pending)
 	}
 }
 ```
