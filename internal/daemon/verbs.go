@@ -94,6 +94,11 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 	}
 	store, err := output.Open(filepath.Join(dir, "out.log"), maxOutput)
 	if err != nil {
+		// Nothing has written meta.json yet, so this directory would sit in
+		// the tasks tree with nothing to sweep it. record.Scan skips it, but
+		// the directories accumulate. Every later failure path keeps its
+		// directory, because a record is saved into it.
+		_ = os.RemoveAll(dir)
 		return StartResult{}, err
 	}
 
@@ -110,6 +115,7 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 	e.AttachStore(store)
 	if err := d.Reg.Add(e); err != nil {
 		_ = store.Close()
+		_ = os.RemoveAll(dir)
 		return StartResult{}, err
 	}
 
@@ -167,9 +173,13 @@ func (d *Daemon) await(e *Entry) {
 	}
 	res := task.Wait()
 	written, retained := store.Counts()
-	_ = store.Close()
 
+	// Finish before Close. Finish clears e.store under e.mu, so once it
+	// returns no further Entry.Log call can be handed this store, and the
+	// window in which a read reaches a store about to close narrows to a read
+	// already in flight — which retries against the reopened log.
 	rec := e.Finish(res, written, retained)
+	_ = store.Close()
 	_ = record.Save(e.Dir(), rec)
 }
 
@@ -193,6 +203,13 @@ func (d *Daemon) enforceCap(e *Entry, seconds int) {
 
 // signal asks a task to stop, then insists after a grace period.
 func (d *Daemon) signal(p SignalParams) (SignalResult, error) {
+	if p.GraceS != nil && *p.GraceS < 0 {
+		// A negative grace makes clock.After fire at once, so SIGTERM would be
+		// followed by SIGKILL with no grace at all — the opposite of what a
+		// caller setting the field is asking for. task_start rejects the same
+		// shape of input on kill_after_s.
+		return SignalResult{}, fmt.Errorf("daemon: grace_s must not be negative, got %d", *p.GraceS)
+	}
 	e, ok := d.Reg.Get(p.ID)
 	if !ok {
 		return SignalResult{}, fmt.Errorf("daemon: no task %q", p.ID)
@@ -319,6 +336,14 @@ func (d *Daemon) read(p ReadParams) (ReadResult, error) {
 			raw = raw[len(raw)-maxResultBytes:]
 		}
 		clean, _ := ansi.Strip(raw)
+		// Liveness first, then the counts. The other order lets a task write
+		// its last bytes and exit between the two statements, which reports
+		// next at the old end of the stream together with eof true: a client
+		// that stops on eof would lose the output the task printed last.
+		// Once Live reports false, Finish has already run and the counts
+		// cannot move, so this pair is consistent. The since branch below
+		// gets the same guarantee from its own evaluation order.
+		live := e.Live()
 		written, retained := store.Counts()
 		// Next always jumps to the end of the stream, even for a task still
 		// running: a tail read is a snapshot of the last N lines, not a
@@ -327,7 +352,7 @@ func (d *Daemon) read(p ReadParams) (ReadResult, error) {
 		// since read gets nothing between the tail window and this call.
 		return ReadResult{
 			Data: string(clean), Next: written,
-			TruncatedBytes: written - retained, EOF: !e.Live(),
+			TruncatedBytes: written - retained, EOF: !live,
 		}, nil
 	}
 

@@ -74,6 +74,12 @@ func New(root string, clk clock.Clock) (*Daemon, error) {
 	if err := os.Chmod(root, 0o700); err != nil { //nolint:gosec // 0700 is a directory mode: the execute bit is required for traversal, and this is the plan's own directory mode constraint
 		return nil, fmt.Errorf("daemon: chmod %s: %w", root, err)
 	}
+	// The same unconditional guarantee for the tasks tree. The 0700 parent
+	// blocks traversal either way, so this is defence in depth rather than an
+	// exposure it closes.
+	if err := os.Chmod(paths.TasksDir(root), 0o700); err != nil { //nolint:gosec // see above: a directory mode, and the plan's own constraint
+		return nil, fmt.Errorf("daemon: chmod %s: %w", paths.TasksDir(root), err)
+	}
 
 	lock, err := lockRoot(root)
 	if err != nil {

@@ -246,6 +246,13 @@ func (e *Entry) Fail(ended time.Time) record.Record {
 }
 
 // Registry holds every task the daemon knows, live or finished.
+//
+// Lock ordering: Registry.mu is always taken before Entry.mu, never the other
+// way round. Add and List hold r.mu while calling Record or Live, which take
+// e.mu. Nothing may take e.mu and then reach for r.mu — Finish and Fail touch
+// no registry, and they must keep it that way. The order is one-directional
+// today only because nothing has needed the other direction, so it is written
+// down here rather than left for the next task to discover by deadlocking.
 type Registry struct {
 	mu     sync.Mutex
 	byID   map[string]*Entry

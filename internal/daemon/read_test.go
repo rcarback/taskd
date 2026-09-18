@@ -457,6 +457,11 @@ func TestSearchMatchEncodesEmptyBeforeAndAfterAsArraysNotMissing(t *testing.T) {
 	if !strings.Contains(string(b), `"after":[]`) {
 		t.Fatalf("encoded = %s, want \"after\":[] rather than a missing key", b)
 	}
+	// The wire name for Match.LineNumber, asserted by name: a Go doc comment
+	// is invisible to a client, and renaming the tag must fail a test.
+	if !strings.Contains(string(b), `"retained_line_number"`) {
+		t.Fatalf("encoded = %s, want the retained_line_number key", b)
+	}
 }
 
 // TestSearchOnEmptyOutputReportsNoPhantomLine guards against

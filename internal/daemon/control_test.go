@@ -74,6 +74,23 @@ func TestSignalEscalatesToKillAfterTheGrace(t *testing.T) {
 	}
 }
 
+func TestSignalRejectsANegativeGrace(t *testing.T) {
+	d := newDaemon(t)
+	got, err := callVerb(t, d, "task_start", StartParams{Command: "sh", Args: []string{"-c", "sleep 60"}})
+	if err != nil {
+		t.Fatalf("task_start: %v", err)
+	}
+
+	grace := -1
+	_, err = callVerb(t, d, "task_signal", SignalParams{ID: got.(StartResult).ID, GraceS: &grace})
+	if err == nil {
+		t.Fatal("task_signal accepted grace_s = -1, which makes the kill follow the term with no grace at all")
+	}
+	if !strings.Contains(err.Error(), "grace_s") {
+		t.Fatalf("error = %q, want it to name the field", err)
+	}
+}
+
 func TestSignalOnAFinishedTaskFails(t *testing.T) {
 	d := newDaemon(t)
 	id := startAndWait(t, d, "exit 0")

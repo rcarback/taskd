@@ -128,10 +128,23 @@ func TestStartDefaultsToAPseudoTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("task_start: %v", err)
 	}
-	e, _ := d.Reg.Get(got.(StartResult).ID)
+	id := got.(StartResult).ID
+	e, _ := d.Reg.Get(id)
 	waitForState(t, e)
 	if !e.Record().PTY {
 		t.Fatal("PTY = false, want true by default")
+	}
+
+	// The record field alone proves nothing: start copies it straight from
+	// the request, so setting Spec.PTY false while leaving the record alone
+	// would keep that assertion green. The task's own answer to "test -t 1"
+	// is what shows it really got a terminal.
+	res, err := callVerb(t, d, "task_read", ReadParams{ID: id})
+	if err != nil {
+		t.Fatalf("task_read: %v", err)
+	}
+	if data := res.(ReadResult).Data; !strings.Contains(data, "yes") {
+		t.Fatalf("Data = %q, want yes: the task did not see a terminal on stdout", data)
 	}
 }
 
