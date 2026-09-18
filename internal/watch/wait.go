@@ -4,6 +4,7 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sync"
@@ -11,6 +12,11 @@ import (
 
 	"github.com/rcarback/taskd/internal/clock"
 )
+
+// ErrNoConditionCanFire reports that every armed condition retired without a
+// win: every source it was watching ended before any condition on it was
+// met. A caller can match it with errors.Is instead of the message text.
+var ErrNoConditionCanFire = errors.New("watch: no condition can still fire: every task ended before any condition was met")
 
 // Source is one task a caller is waiting on.
 //
@@ -20,6 +26,15 @@ import (
 type Source interface {
 	ID() string
 	Tap() *Tap
+
+	// Done closes once the task has ended.
+	//
+	// Every byte the task wrote must have already reached Tap() before
+	// Done closes: a KindMatch or KindLines wait that races the task's
+	// final output against its exit relies on that ordering to recover a
+	// match found on the last line rather than losing it to the task
+	// ending. An implementation that closes Done before its tap has
+	// drained the task's output breaks that guarantee silently.
 	Done() <-chan struct{}
 }
 
@@ -46,14 +61,25 @@ func Wait(ctx context.Context, clk clock.Clock, srcs []Source, until []Condition
 	// proved every pattern compiles, so this cannot fail in practice, but
 	// a failure inside a spawned goroutine would panic with no recover and
 	// take the whole daemon down instead of returning an error.
+	//
+	// The default case below serves the same purpose for an unrecognised
+	// Kind: Validate already rejects one, so this is unreachable through
+	// the public API, but checking it here — synchronously, before
+	// anything is spawned — means a broken caller of this package (a
+	// future condition type added to Kind without a case here or in arm)
+	// gets an error instead of arm's default silently arming nothing.
 	compiled := make([]*regexp.Regexp, len(until))
 	for i, cond := range until {
-		if cond.Type == KindMatch {
+		switch cond.Type {
+		case KindMatch:
 			re, err := regexp.Compile(cond.Pattern)
 			if err != nil {
 				return Event{}, fmt.Errorf("watch: %w", err)
 			}
 			compiled[i] = re
+		case KindExit, KindElapsed, KindIdle, KindLines:
+		default:
+			return Event{}, fmt.Errorf("watch: condition type %q slipped past Validate", cond.Type)
 		}
 	}
 
@@ -101,7 +127,19 @@ func Wait(ctx context.Context, clk clock.Clock, srcs []Source, until []Condition
 	case <-ctx.Done():
 		waitErr = ctx.Err()
 	case <-retired:
-		waitErr = fmt.Errorf("watch: no condition can still fire: every task ended before any condition was met")
+		// A cancellation can retire every arm and close retired in the
+		// same instant: every goroutine returns through its own
+		// ctx.Done() case, the WaitGroup reaches zero, and the detector
+		// closes retired right behind it. When that happens, ctx.Done()
+		// is also ready, and this select breaks the tie at random — so
+		// checking ctx.Err() here, rather than trusting that retired
+		// winning means retirement is the true story, keeps a client
+		// hanging up from being misreported as "every task ended".
+		if err := ctx.Err(); err != nil {
+			waitErr = err
+		} else {
+			waitErr = ErrNoConditionCanFire
+		}
 	}
 
 	// fired is buffered for every armed condition, so a real event can
@@ -199,13 +237,14 @@ func arm(ctx context.Context, clk clock.Clock, src Source, cond Condition, re *r
 		}
 
 	default:
-		// Validate rejects any Kind but the five handled above, so this
-		// is unreachable through the public API. Panicking rather than
-		// falling through silently matters here specifically: a kind that
-		// arms nothing contributes neither a win nor a retirement, and
-		// Wait would have no way to tell the difference from a condition
-		// that is still legitimately pending.
-		panic(fmt.Sprintf("watch: arm: condition type %q slipped past Validate", cond.Type))
+		// Validate, and the pre-arm loop in Wait, both reject any Kind but
+		// the five handled above, so this is unreachable through the
+		// public API — the loud failure for that case lives there,
+		// synchronously, before anything is spawned. A bare return here
+		// contributes an ordinary retirement (wg.Done() runs via the
+		// caller's defer) rather than a panic: arm runs on a goroutine
+		// Wait spawns with no recover above it, and a panic here would
+		// take the whole daemon down along with every task it supervises.
 	}
 }
 

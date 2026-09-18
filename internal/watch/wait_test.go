@@ -114,11 +114,21 @@ func TestWaitIdleReArmsAfterOutput(t *testing.T) {
 	// would race the goroutine under test: a single-timer implementation's
 	// send might not have reached ch yet, letting this assertion pass
 	// against exactly the bug it exists to catch.
-	fake.BlockUntil(1)
+	//
+	// Against that same single-timer bug, the re-arm this BlockUntil is
+	// waiting for never happens, so it must not block the test directly:
+	// that would hang until the whole test binary's timeout and dump a
+	// stack instead of running the t.Fatalf below. Racing it against ch
+	// in a select lets a buggy implementation's eventual send win instead.
+	synced := make(chan struct{})
+	go func() {
+		fake.BlockUntil(1)
+		close(synced)
+	}()
 	select {
 	case got := <-ch:
 		t.Fatalf("fired after 200s of silence: %+v", got.e)
-	default:
+	case <-synced:
 	}
 
 	fake.BlockUntil(1)
@@ -233,8 +243,8 @@ func TestWaitReturnsErrorWhenIdleSourceExits(t *testing.T) {
 
 	select {
 	case got := <-ch:
-		if got.err == nil {
-			t.Fatalf("Wait: got nil error and %+v, want an error: idle must not fire once its source has exited", got.e)
+		if !errors.Is(got.err, watch.ErrNoConditionCanFire) {
+			t.Fatalf("Wait error = %v, want ErrNoConditionCanFire: idle must not fire once its source has exited", got.err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Wait did not return within 5s: every armed condition retired without firing, so it must not hang")
@@ -264,8 +274,8 @@ func TestWaitReturnsErrorWhenMatchSourceExitsWithoutMatch(t *testing.T) {
 
 	select {
 	case got := <-ch:
-		if got.err == nil {
-			t.Fatalf("Wait: got nil error and %+v, want an error: match must not hang once its source has exited without matching", got.e)
+		if !errors.Is(got.err, watch.ErrNoConditionCanFire) {
+			t.Fatalf("Wait error = %v, want ErrNoConditionCanFire: match must not hang once its source has exited without matching", got.err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Wait did not return within 5s: every armed condition retired without firing, so it must not hang")
