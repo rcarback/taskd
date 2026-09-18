@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/rcarback/taskd/internal/paths"
 )
 
 func TestNewCreatesAUniqueDirectory(t *testing.T) {
@@ -37,6 +39,20 @@ func TestNewCreatesAUniqueDirectory(t *testing.T) {
 	}
 	if filepath.Dir(firstDir) != filepath.Join(root, "tasks") {
 		t.Fatalf("parent = %s, want %s", filepath.Dir(firstDir), filepath.Join(root, "tasks"))
+	}
+}
+
+func TestNewAgreesWithPathsTasksDir(t *testing.T) {
+	t.Setenv(paths.RootEnv, filepath.Join(t.TempDir(), "root"))
+	root := paths.Root()
+
+	dir, _, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if want := paths.TasksDir(root); filepath.Dir(dir) != want {
+		t.Fatalf("parent = %s, want %s: taskdir and paths disagree on the tasks directory", filepath.Dir(dir), want)
 	}
 }
 

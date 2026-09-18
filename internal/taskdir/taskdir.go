@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/rcarback/taskd/internal/paths"
 )
 
 var (
@@ -27,7 +29,7 @@ func New(root string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	dir := filepath.Join(root, "tasks", id)
+	dir := filepath.Join(paths.TasksDir(root), id)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", "", fmt.Errorf("taskdir: create %s: %w", dir, err)
 	}
