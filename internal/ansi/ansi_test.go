@@ -2,7 +2,10 @@
 
 package ansi
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestStrip(t *testing.T) {
 	cases := []struct {
@@ -54,6 +57,9 @@ func TestStripReportsAnIncompleteTail(t *testing.T) {
 		{"a complete CSI is not pending", "ok\x1b[31mdone", "okdone", 0},
 		{"no escapes at all", "plain text", "plain text", 0},
 		{"an escape mid-buffer is not pending", "a\x1bXb", "ab", 0},
+		{"a doubled bare escape", "\x1b\x1b", "", 2},
+		{"a bare escape before a truncated CSI", "ok\x1b\x1b[31", "ok", 5},
+		{"a complete CSI followed by a trailing bare escape", "z\x1b[31m\x1b", "z", 1},
 	}
 
 	for _, c := range cases {
@@ -64,6 +70,9 @@ func TestStripReportsAnIncompleteTail(t *testing.T) {
 			}
 			if pending != c.wantPending {
 				t.Fatalf("pendingLen = %d, want %d", pending, c.wantPending)
+			}
+			if bytes.ContainsRune(clean, 0x1b) {
+				t.Fatalf("clean = %q contains a raw ESC byte", clean)
 			}
 		})
 	}

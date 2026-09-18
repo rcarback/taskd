@@ -21,10 +21,16 @@ var escape = regexp.MustCompile(
 // finished by the end of it: a lone escape, a CSI without its final byte, or
 // an OSC without its terminator. Every alternative is anchored to the end,
 // so a match can only be the buffer's trailing bytes.
+//
+// Each alternative is prefixed with `\x1b*` to absorb any run of bare ESC
+// bytes immediately ahead of the unfinished construct. Without it, FindIndex
+// anchors on the last ESC of such a run and strands the earlier ones just
+// before the trimmed tail, where escape can never match them (a two-byte
+// escape needs a byte after ESC) and they leak into clean unstripped.
 var incomplete = regexp.MustCompile(
-	`\x1b$` +
-		`|\x1b\[[0-9;?]*[ -/]*$` +
-		`|\x1b\][^\x07\x1b]*\x1b?$`,
+	`\x1b*\x1b$` +
+		`|\x1b*\x1b\[[0-9;?]*[ -/]*$` +
+		`|\x1b*\x1b\][^\x07\x1b]*\x1b?$`,
 )
 
 // Strip removes terminal escape sequences from b.
