@@ -98,6 +98,36 @@ func TestDispatchRejectsAnUnknownSubcommand(t *testing.T) {
 	}
 }
 
+func TestWaitUsageOnNoID(t *testing.T) {
+	var out bytes.Buffer
+	if code := dispatch([]string{"wait"}, &out); code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(out.String(), "--id") {
+		t.Errorf("output = %q, want it to name the missing flag", out.String())
+	}
+}
+
+func TestWaitRejectsABadUntil(t *testing.T) {
+	var out bytes.Buffer
+	if code := dispatch([]string{"wait", "--id", "abc", "--until", "forever"}, &out); code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(out.String(), "unknown condition type") {
+		t.Errorf("output = %q, want it to name the bad condition", out.String())
+	}
+}
+
+func TestUsageNamesWait(t *testing.T) {
+	var out bytes.Buffer
+	if code := dispatch(nil, &out); code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(out.String(), "taskd wait") {
+		t.Errorf("usage = %q, want it to list the wait subcommand", out.String())
+	}
+}
+
 func TestExitCodeCoversEveryTerminalState(t *testing.T) {
 	cases := []struct {
 		name string

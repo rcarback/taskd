@@ -62,9 +62,9 @@ Seven tools: `task_start`, `task_wait`, `task_status`, `task_read`,
 
 | Host | Wake path | Status |
 |------|-----------|--------|
-| Pi | Extension pushes a turn in process | Confirmed |
+| Pi | Extension pushes a turn in process | Adapter not built yet, uses long poll |
 | Claude Code | Background waiter, host notifies on exit | Works today |
-| Codex | `codex queue --thread` | Unverified, uses long poll until tested |
+| Codex | `codex queue --thread` | Adapter not built yet, uses long poll |
 
 Long poll works everywhere and always returns a warning, because a blocked
 agent is the problem this tool exists to remove.

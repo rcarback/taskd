@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rcarback/taskd/internal/client"
+	"github.com/rcarback/taskd/internal/clock"
 	"github.com/rcarback/taskd/internal/proto"
 	"github.com/rcarback/taskd/internal/record"
 	"github.com/rcarback/taskd/internal/supervisor"
@@ -219,5 +222,68 @@ func TestServeConnReturnsWhenTheClientHangsUpDuringALongPoll(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("serveConn did not return within 5s of the client hanging up mid task_wait")
+	}
+}
+
+// TestClientCallStartsATaskAndWaitsOnItOverTheSocket drives a real daemon
+// through the client package rather than a handler or a hand-rolled
+// connection, exercising task_start and task_wait exactly as the taskd wait
+// subcommand does.
+func TestClientCallStartsATaskAndWaitsOnItOverTheSocket(t *testing.T) {
+	root := shortRoot(t)
+	d, err := New(root, clock.System())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d.Register()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Serve returned %v, want nil after cancellation", err)
+		}
+	})
+
+	startParams, err := json.Marshal(StartParams{Command: "true"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	startRes, err := client.Call(root, proto.Request{Verb: proto.VerbStart, Params: startParams})
+	if err != nil {
+		t.Fatalf("client.Call task_start: %v", err)
+	}
+	if !startRes.OK {
+		t.Fatalf("task_start OK = false, error = %q", startRes.Error)
+	}
+	var started StartResult
+	if err := json.Unmarshal(startRes.Result, &started); err != nil {
+		t.Fatalf("Unmarshal StartResult: %v", err)
+	}
+
+	waitParams, err := json.Marshal(WaitParams{
+		IDs: []string{started.ID}, Until: []watch.Condition{{Type: watch.KindExit}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	waitRes, err := client.Call(root, proto.Request{Verb: proto.VerbWait, Params: waitParams})
+	if err != nil {
+		t.Fatalf("client.Call task_wait: %v", err)
+	}
+	if !waitRes.OK {
+		t.Fatalf("task_wait OK = false, error = %q", waitRes.Error)
+	}
+	var w WaitResult
+	if err := json.Unmarshal(waitRes.Result, &w); err != nil {
+		t.Fatalf("Unmarshal WaitResult: %v", err)
+	}
+	if w.ID != started.ID {
+		t.Errorf("ID = %q, want %q", w.ID, started.ID)
+	}
+	if w.State != "exited" {
+		t.Errorf("State = %q, want exited", w.State)
 	}
 }

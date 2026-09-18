@@ -55,3 +55,21 @@ After a crash, `reconcile` stamps `EndedAt` with the restart time, because
 nothing can recover the true end time. Any duration computed from a record in
 the `lost` state is wrong. The documentation needs to say so somewhere a user
 reads.
+
+## `watch.ActionNotify` wakes nobody
+
+`watch.CompilePatterns` accepts `watch.ActionNotify` on a start-time pattern.
+Once compiled, `ActionNotify` behaves exactly like `watch.ActionRecord`: it
+counts the match and records the last line and its capture groups. It wakes
+no one. A caller can set `on_match: "notify"` today and get silence, with no
+error saying so.
+
+Wiring `ActionNotify` needs broadcast-capable waiter machinery inside `Tap`,
+repeatable, observed by every current subscriber. `Tap.Killed()` is
+deliberately single-shot, built for a one-time kill signal, and cannot serve
+this case. This belongs with the wake adapters of the next plan.
+
+## `deliver: "notify"` degrades to a long poll
+
+No notification delivery path exists yet, so `task_wait` blocks under every
+`deliver` value and returns a warning saying so.

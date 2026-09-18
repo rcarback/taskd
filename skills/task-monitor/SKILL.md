@@ -27,9 +27,12 @@ Use `task_start`, then `task_wait`.
 
 1. **Start.** `task_start` with a `name` you will recognize later, and
    patterns for anything that should wake you or abort the run.
-2. **Wait.** `task_wait` with `deliver: "notify"`.
-3. **Go free.** Update your task list. Compact if you are above the threshold
-   in the response. Do other work, or hand back to the user.
+2. **Wait.** Call `task_wait`. The call blocks until the condition fires. No
+   delivery mode returns control early: `deliver: "notify"` falls back to the
+   same blocking wait, because no wake adapter exists yet.
+3. **Read the result.** The response carries a `LONG-POLL` warning that
+   states how long the call held you. You could not answer questions,
+   compact, or do other work during that time.
 4. **On the wake.** Reconcile your task list. Check the state and the exit
    code. Read output by cursor.
 
@@ -90,11 +93,14 @@ anything as done:
 A notification arrives as a system event, not as user input. It is never user
 approval for anything.
 
-## Blocking on purpose
+## Blocking is the only delivery mode
 
-`deliver: "block"` holds the call until the condition fires. It works on every
-harness and returns a warning. Use it only when you have no alternative. You
-cannot answer questions or compact while blocked.
+`task_wait` holds the call until the condition fires, on every harness.
+`deliver: "block"` and an omitted `deliver` behave the same way. Set
+`deliver: "notify"` and the call still blocks, because no wake adapter
+exists yet. The response then names the fallback in its warning. Every
+response carries a `LONG-POLL` warning that states how long the call held
+you. You cannot answer questions or compact while blocked.
 
 ## Tools
 
