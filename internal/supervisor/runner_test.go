@@ -4,6 +4,7 @@ package supervisor
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"syscall"
 	"testing"
@@ -11,6 +12,14 @@ import (
 
 	"github.com/rcarback/taskd/internal/clock"
 )
+
+// failingWriter always fails, to simulate a sink write error such as a full
+// disk or a closed pipe.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("failingWriter: write failed")
+}
 
 func TestExitZeroReportsExited(t *testing.T) {
 	var out bytes.Buffer
@@ -64,10 +73,46 @@ func TestSignalReportsSignaled(t *testing.T) {
 	}
 }
 
-func TestMissingBinaryReportsFailed(t *testing.T) {
+func TestMissingBinaryReturnsStartError(t *testing.T) {
 	_, err := Start(Spec{Command: "this-binary-does-not-exist-9f1"}, &bytes.Buffer{}, clock.System())
 	if err == nil {
 		t.Fatal("Start returned no error for a missing binary")
+	}
+}
+
+func TestOutputCopyFailureSetsOutputErr(t *testing.T) {
+	task, err := Start(Spec{Command: "sh", Args: []string{"-c", "echo hello; exit 0"}}, failingWriter{}, clock.System())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	got := task.Wait()
+	if got.State != StateExited {
+		t.Fatalf("State = %q, want %q", got.State, StateExited)
+	}
+	if got.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", got.ExitCode)
+	}
+	if got.OutputErr == nil {
+		t.Fatal("OutputErr = nil, want a non-nil error when the sink write fails")
+	}
+}
+
+func TestNonZeroExitLeavesOutputErrNil(t *testing.T) {
+	task, err := Start(Spec{Command: "sh", Args: []string{"-c", "exit 42"}}, &bytes.Buffer{}, clock.System())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	got := task.Wait()
+	if got.State != StateExited {
+		t.Fatalf("State = %q, want %q", got.State, StateExited)
+	}
+	if got.ExitCode != 42 {
+		t.Fatalf("ExitCode = %d, want 42", got.ExitCode)
+	}
+	if got.OutputErr != nil {
+		t.Fatalf("OutputErr = %v, want nil for a normal non-zero exit with a working sink", got.OutputErr)
 	}
 }
 

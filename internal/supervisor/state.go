@@ -32,4 +32,9 @@ type Result struct {
 	Started     time.Time
 	Ended       time.Time
 	MaxRSSBytes int64
+
+	// OutputErr is non-nil when copying the task's output into the sink
+	// failed, so the captured log is incomplete. The process status in
+	// State and ExitCode is still accurate.
+	OutputErr error
 }

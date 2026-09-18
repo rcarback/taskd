@@ -3,6 +3,7 @@
 package supervisor
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -57,9 +58,9 @@ func Start(spec Spec, sink io.Writer, clk clock.Clock) (*Task, error) {
 
 // reap waits for the child and records the result exactly once.
 func (t *Task) reap(startedAt time.Time) {
-	_ = t.cmd.Wait()
+	waitErr := t.cmd.Wait()
 	t.once.Do(func() {
-		t.result = t.buildResult(startedAt)
+		t.result = t.buildResult(startedAt, waitErr)
 		close(t.done)
 	})
 }
@@ -70,7 +71,9 @@ func (t *Task) Wait() Result {
 	return t.result
 }
 
-// Signal sends sig to the task. It is a no-op once the task has ended.
+// Signal sends sig to the task. Once the task has ended, the underlying
+// process is already reaped and Signal returns an error reporting that the
+// signal could not be delivered.
 func (t *Task) Signal(sig os.Signal) error {
 	if t.cmd.Process == nil {
 		return fmt.Errorf("supervisor: task has no process")
@@ -85,12 +88,17 @@ func (t *Task) Signal(sig os.Signal) error {
 //
 // A task that ended on a signal reports StateSignaled and carries no
 // meaningful exit code, so callers must read State first.
-func (t *Task) buildResult(startedAt time.Time) Result {
+func (t *Task) buildResult(startedAt time.Time, waitErr error) Result {
 	res := Result{Started: startedAt, Ended: t.clk.Now()}
 
 	state := t.cmd.ProcessState
 	if state == nil {
-		res.State = StateFailed
+		// The task started (Start already returned successfully), so this
+		// is not a launch failure: it is an exit status that became
+		// unavailable, for example because something outside this package
+		// reaped the child first. That is StateLost, not StateFailed;
+		// StateFailed is reserved for a process that never started.
+		res.State = StateLost
 		return res
 	}
 
@@ -104,6 +112,16 @@ func (t *Task) buildResult(startedAt time.Time) Result {
 
 	if ru, ok := state.SysUsage().(*syscall.Rusage); ok {
 		res.MaxRSSBytes = maxRSSBytes(ru)
+	}
+
+	// cmd.Wait's error also reports a failure in the goroutine copying the
+	// child's output into the sink. A non-zero exit surfaces here as an
+	// *exec.ExitError, which is a normal outcome already captured above via
+	// State and ExitCode, not an output failure. Anything else is a real
+	// copy error, most commonly a sink write that failed.
+	var exitErr *exec.ExitError
+	if waitErr != nil && !errors.As(waitErr, &exitErr) {
+		res.OutputErr = waitErr
 	}
 	return res
 }
