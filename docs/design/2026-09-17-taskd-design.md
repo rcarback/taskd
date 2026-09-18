@@ -221,7 +221,7 @@ The daemon holds subscriptions. Delivery differs per harness.
 |---------|---------|----------|--------|
 | Pi | Extension holds a live socket subscription | Pi extension | Confirmed |
 | Claude Code | `taskd wait` as a background command | None | Works today |
-| Codex | `codex queue --thread <id> --message` | Hook and template | Unverified |
+| Codex | `codex queue --thread <id> --message` | Hook and template | Assumed, unverified |
 
 ### Pi
 
@@ -270,9 +270,13 @@ session. Measured behavior appears in the Measured constraints section.
 2. Delivery runs `codex queue --thread <id> --message <text>`. The id and the
    text pass as separate argument vector entries from a fixed template.
 
-Whether step 2 wakes an idle session is unverified. Until that test passes,
-the Codex adapter ships disabled and Codex uses long poll with the warning. A
-config flag turns it on.
+Whether step 2 wakes an idle session is unverified. The adapter ships enabled
+and assumes that it works. A config flag turns it off.
+
+This assumption is deliberate. No measurement supports it. Codex credits were
+exhausted on 2026-09-17, and routing Codex to another provider failed. Verify
+the behavior when credits return, then fix the adapter if the assumption is
+wrong. Until then, treat Codex delivery as unproven.
 
 ### Delivery failure
 
@@ -318,10 +322,20 @@ The daemon cannot measure context usage. The threshold is advisory text that
 the model applies to its own window. The number travels in the response,
 because a model does not reliably recall a value from a skill file.
 
-The threshold comes from config, with a model-aware default. Smaller windows
-take 25%. Large windows step down, because 25% of a one million token window
-is not a useful warning. The Pi extension resolves the model. An MCP server
-under Codex or Claude Code does not, and takes the configured default.
+The threshold comes from config, with a model-aware default:
+
+| Context window | Prompt to compact above |
+|----------------|-------------------------|
+| 200,000 tokens or less | 25% |
+| 200,001 to 500,000 tokens | 15% |
+| More than 500,000 tokens | 8% |
+
+The percentages fall as the window grows, which keeps the trigger point inside
+a band of roughly 50,000 to 80,000 tokens at every size. A flat percentage
+would fire far too late on a one million token window.
+
+The Pi extension resolves the model. An MCP server under Codex or Claude Code
+does not, and takes the configured default.
 
 The long poll path inverts item 3 and leads with the warning.
 
@@ -454,7 +468,10 @@ taskd/
 
 ## Open items
 
-1. **Codex wake test.** Blocked until 2026-09-20, when native credits reset.
+1. **Codex wake test.** Deferred by decision on 2026-09-17. The adapter
+   assumes that `codex queue` wakes an idle session. Verify when credits
+   return, and fix the adapter if the assumption is wrong.
+
    Routing Codex through an alternate provider failed. Codex 0.154 accepts
    only the Responses API, cannot refresh its model catalog for an unknown
    provider, and then loops on `Reconnecting... waiting for network`. Setting
@@ -462,6 +479,7 @@ taskd/
    the loop is a connectivity watchdog upstream of the request.
 2. **Codex built-in tools.** Investigate `sleep_tool` and
    `background_terminal_max_timeout` before writing the Codex adapter.
-3. **Context threshold table.** The model-aware defaults need concrete values.
+3. **Context threshold table.** Set to the values in the Agent-facing text section.
+   Revise them after watching how often the prompt fires.
 4. **Task list mechanism.** The design stays harness-neutral about the
    task list mechanism.
