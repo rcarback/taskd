@@ -4,13 +4,13 @@ package daemon
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 
 	"github.com/rcarback/taskd/internal/proto"
+	"github.com/rcarback/taskd/internal/supervisor"
 )
 
 // TestRewind covers every branch of the free function directly: no test in
@@ -249,17 +249,25 @@ func TestReadReachesALiveTaskThroughTheOpenStore(t *testing.T) {
 		t.Fatal("EOF = true for a task still running, want false: this must go through Entry.Log's live-store branch")
 	}
 
-	// Unblock the task: opening the FIFO for writing and closing it without
-	// writing anything hands cat an EOF, so it exits and the entry reaches a
-	// terminal state that waitForState can observe.
-	w, err := os.OpenFile(fifo, os.O_WRONLY, 0) //nolint:gosec // fifo is a path this test just created under t.TempDir(), not untrusted input
-	if err != nil {
-		t.Fatalf("open fifo for writing: %v", err)
+	// End the task with a signal rather than by handing it an end of input.
+	//
+	// The obvious way to finish a task blocked on a FIFO is to open the write
+	// end and close it without writing. That is racy, and it hung this test at
+	// roughly 0.3 percent under parallel load. cat is still inside its own
+	// open(O_RDONLY) here, not yet reading: a writer that opens and closes
+	// again within microseconds can come and go without that pending open ever
+	// observing it, and cat then waits for a writer that never returns.
+	// Measured over 1920 runs: the task never recovered on its own, and
+	// opening one more writer later released it every time.
+	//
+	// A signal does not need that handshake. open() is interruptible, so the
+	// task ends whether or not it ever reached its first read.
+	if _, err := callVerb(t, d, "task_signal", SignalParams{ID: id}); err != nil {
+		t.Fatalf("task_signal: %v", err)
 	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("close fifo writer: %v", err)
+	if state := waitForState(t, e); state != supervisor.StateKilled {
+		t.Fatalf("State = %q, want killed: this test asked for the signal", state)
 	}
-	waitForState(t, e)
 }
 
 // request encodes v as one verb request.

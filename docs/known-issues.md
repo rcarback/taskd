@@ -4,39 +4,6 @@ Open items carried out of the daemon and protocol work. Each one is recorded
 here because a review found it, decided not to fix it on that branch, and gave
 a reason.
 
-## A test deadlocks at about 0.5 percent under parallel load
-
-`TestReadReachesALiveTaskThroughTheOpenStore` in
-`internal/daemon/read_test.go` hangs. It does not fail slowly. Raising the
-10 second bound does not help: an instrumented run waited a further 100
-seconds and never completed.
-
-The test starts a task as `cat <fifo>`, then opens the write end of the FIFO
-and closes it to hand `cat` an end of input. At the hang, `cat` is still
-alive and blocked in `read`, which means a write end of that FIFO is still
-open somewhere. The daemon side is correct. `supervisor.(*Task).reap` waits
-in `Wait4` for a child that has not exited, and the pseudo-terminal
-copy goroutine is in a normal read.
-
-This is a defect in the test, not in the product. No production task reads a
-FIFO that the daemon arranges, and nothing in `internal/daemon` or
-`internal/supervisor` is stuck.
-
-Measured at roughly 5 failures in 1000 runs under 8 to 24 concurrent test
-binaries. It reproduces on the commit before the fix round as well, so it
-predates that work.
-
-The holder of the write end is not identified. `lsof` reported nothing for
-the FIFO path on the machine used, including for `cat`, which held the read end.
-
-One lead, untested. A process forked by another test in the same binary may
-inherit the write end before anything closes it. The failure appears only
-under parallel load, and load raises the number of concurrent forks. Go sets
-close-on-exec on the files it opens, so this needs proof before anyone acts
-on it.
-
-Expect this to fail in continuous integration.
-
 ## The task_search response size is not bounded
 
 `task_read` clamps its result against `proto.MaxMessageBytes`. `task_search`
