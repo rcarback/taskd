@@ -122,6 +122,33 @@ type SearchResult struct {
 	More           bool    `json:"more"`
 }
 
+// SignalParams is task_signal's input.
+//
+// The default is SIGTERM followed by SIGKILL after GraceS seconds, which is
+// what a caller almost always wants: ask the task to stop, then insist.
+type SignalParams struct {
+	ID     string `json:"id"`
+	Signal string `json:"signal,omitempty"`
+	GraceS *int   `json:"grace_s,omitempty"`
+}
+
+// SignalResult is task_signal's output.
+type SignalResult struct {
+	ID     string `json:"id"`
+	Signal string `json:"signal"`
+}
+
+// WriteParams is task_write's input.
+type WriteParams struct {
+	ID   string `json:"id"`
+	Data string `json:"data"`
+}
+
+// WriteResult is task_write's output.
+type WriteResult struct {
+	Written int `json:"written"`
+}
+
 // defaultMaxOutput bounds one task's retained log when the caller sets no
 // limit.
 const defaultMaxOutput = 8 << 20
@@ -133,3 +160,7 @@ const (
 	defaultReadBytes  = 64 << 10
 	defaultMaxMatches = 50
 )
+
+// defaultGraceSeconds is how long a task has to exit on SIGTERM before
+// taskd sends SIGKILL.
+const defaultGraceSeconds = 10

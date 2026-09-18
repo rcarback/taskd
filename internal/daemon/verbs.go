@@ -27,6 +27,8 @@ func (d *Daemon) Register() {
 	d.Handle(proto.VerbStatus, jsonHandler(d.status))
 	d.Handle(proto.VerbRead, jsonHandler(d.read))
 	d.Handle(proto.VerbSearch, jsonHandler(d.search))
+	d.Handle(proto.VerbSignal, jsonHandler(d.signal))
+	d.Handle(proto.VerbWrite, jsonHandler(d.write))
 }
 
 // saveRecord persists a task's record to disk. It is a variable, not a
@@ -113,7 +115,7 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 
 	task, err := supervisor.Start(supervisor.Spec{
 		Command: p.Command, Args: p.Args, Dir: p.Cwd,
-		Env: os.Environ(), PTY: usePTY,
+		Env: os.Environ(), PTY: usePTY, Stdin: !usePTY,
 	}, storeWriter{store}, d.Clk)
 	if err != nil {
 		_ = store.Close()
@@ -179,6 +181,66 @@ func (d *Daemon) enforceCap(e *Entry, seconds int) {
 		e.RequestKill()
 		_ = task.Signal(syscall.SIGKILL)
 	}
+}
+
+// signal asks a task to stop, then insists after a grace period.
+func (d *Daemon) signal(p SignalParams) (SignalResult, error) {
+	e, ok := d.Reg.Get(p.ID)
+	if !ok {
+		return SignalResult{}, fmt.Errorf("daemon: no task %q", p.ID)
+	}
+	task := e.LiveTask()
+	if task == nil {
+		return SignalResult{}, fmt.Errorf("daemon: task %q has already ended", p.ID)
+	}
+
+	sig := syscall.SIGTERM
+	if strings.EqualFold(p.Signal, "KILL") {
+		sig = syscall.SIGKILL
+	}
+
+	// The task ends because taskd asked, so its terminal state is killed
+	// rather than signaled. Record that before the signal lands, or the
+	// waiter can finish first and report signaled.
+	e.RequestKill()
+	if err := task.Signal(sig); err != nil {
+		return SignalResult{}, err
+	}
+
+	if sig == syscall.SIGTERM {
+		grace := defaultGraceSeconds
+		if p.GraceS != nil {
+			grace = *p.GraceS
+		}
+		go d.insist(e, task, grace)
+	}
+	return SignalResult{ID: p.ID, Signal: sig.String()}, nil
+}
+
+// insist sends SIGKILL if the task has not ended within grace seconds.
+func (d *Daemon) insist(e *Entry, task *supervisor.Task, grace int) {
+	select {
+	case <-e.Done():
+	case <-d.Clk.After(time.Duration(grace) * time.Second):
+		_ = task.Signal(syscall.SIGKILL)
+	}
+}
+
+// write sends input to a running task.
+func (d *Daemon) write(p WriteParams) (WriteResult, error) {
+	e, ok := d.Reg.Get(p.ID)
+	if !ok {
+		return WriteResult{}, fmt.Errorf("daemon: no task %q", p.ID)
+	}
+	task := e.LiveTask()
+	if task == nil {
+		return WriteResult{}, fmt.Errorf("daemon: task %q has already ended", p.ID)
+	}
+	n, err := task.Write([]byte(p.Data))
+	if err != nil {
+		return WriteResult{}, err
+	}
+	return WriteResult{Written: n}, nil
 }
 
 // status reports terse state for the requested tasks, or lists.
