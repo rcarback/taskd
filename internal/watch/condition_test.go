@@ -102,3 +102,37 @@ func TestParseUntilEmptyGivesDefaults(t *testing.T) {
 		t.Fatalf("ParseUntil(\"\") = %+v, want the defaults", got)
 	}
 }
+
+func TestParseUntilRejectsEmptyConditions(t *testing.T) {
+	cases := map[string]string{
+		"single comma":      ",",
+		"comma with spaces": " , ",
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := watch.ParseUntil(input)
+			if err == nil {
+				t.Fatalf("ParseUntil(%q) = nil, want an error", input)
+			}
+			if !strings.Contains(err.Error(), "no valid conditions") {
+				t.Errorf("error = %q, want it to contain %q", err, "no valid conditions")
+			}
+		})
+	}
+}
+
+func TestParseUntilElapsed(t *testing.T) {
+	got, err := watch.ParseUntil("elapsed:600")
+	if err != nil {
+		t.Fatalf("ParseUntil: %v", err)
+	}
+	want := []watch.Condition{
+		{Type: watch.KindElapsed, Seconds: 600},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ParseUntil returned %d conditions, want %d", len(got), len(want))
+	}
+	if got[0] != want[0] {
+		t.Errorf("ParseUntil()[0] = %+v, want %+v", got[0], want[0])
+	}
+}

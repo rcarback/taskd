@@ -149,6 +149,10 @@ func ParseUntil(s string) ([]Condition, error) {
 		conds = append(conds, c)
 	}
 
+	if len(conds) == 0 {
+		return nil, fmt.Errorf("watch: no valid conditions in %q", s)
+	}
+
 	if err := Validate(conds); err != nil {
 		return nil, err
 	}
