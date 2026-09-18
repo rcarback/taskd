@@ -3,7 +3,6 @@
 package supervisor
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,17 +23,62 @@ type Spec struct {
 	PTY     bool
 }
 
+// errRecordingWriter wraps sink and records the first error sink.Write
+// returns, so buildResult can surface a failed output write as
+// Result.OutputErr on either path Start can take.
+//
+// A non-zero exit makes cmd.Wait return an *exec.ExitError before it ever
+// looks at a copy goroutine's own error (see os/exec's awaitGoroutines), so
+// deriving OutputErr from cmd.Wait's error would silently drop a real sink
+// write failure whenever the child also happened to exit non-zero. This
+// type observes the write directly instead, independent of cmd.Wait.
+//
+// os/exec also collapses cmd.Stdout and cmd.Stderr onto a single copy
+// goroutine only when they are the identical interface value. Start
+// constructs exactly one errRecordingWriter per task and uses that same
+// pointer everywhere a sink is needed, so Write is never called by two
+// goroutines at once; the mutex here only guards a Write against a
+// concurrent Err() call.
+type errRecordingWriter struct {
+	sink io.Writer
+
+	mu  sync.Mutex
+	err error
+}
+
+func (w *errRecordingWriter) Write(p []byte) (int, error) {
+	n, err := w.sink.Write(p)
+	if err != nil {
+		w.mu.Lock()
+		if w.err == nil {
+			w.err = err
+		}
+		w.mu.Unlock()
+	}
+	return n, err
+}
+
+// Err reports the first error a write into the wrapped sink returned, or
+// nil.
+func (w *errRecordingWriter) Err() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.err
+}
+
 // Task is a running child process owned by this process.
 type Task struct {
 	cmd *exec.Cmd
 	clk clock.Clock
 
-	// pty is set only for a task started on a pseudo-terminal. It carries
-	// the copy goroutine's done channel, the master to bound a wait on a
-	// lingering grandchild, and any sink write error. It is nil for a task
-	// started on a plain pipe, since cmd.Wait already waits for that output
-	// copy to finish and reports any of its errors directly.
+	// pty is set only for a task started on a pseudo-terminal, so reap can
+	// bound how long it waits for its copy goroutine. It is nil for a task
+	// started on a plain pipe, since cmd.Wait already waits for that copy to
+	// finish on its own.
 	pty *ptyStream
+	// outputRec records the first error writing the task's output into
+	// sink, on either path.
+	outputRec *errRecordingWriter
 
 	once   sync.Once
 	result Result
@@ -51,30 +95,31 @@ func Start(spec Spec, sink io.Writer, clk clock.Clock) (*Task, error) {
 	cmd.Env = spec.Env
 
 	startedAt := clk.Now()
+	rec := &errRecordingWriter{sink: sink}
 
 	var stream *ptyStream
 	if spec.PTY {
-		s, err := startPTY(cmd, sink)
+		s, err := startPTY(cmd, rec)
 		if err != nil {
 			return nil, err
 		}
 		stream = s
 	} else {
-		cmd.Stdout = sink
-		cmd.Stderr = sink
+		cmd.Stdout = rec
+		cmd.Stderr = rec
 		if err := cmd.Start(); err != nil {
 			return nil, fmt.Errorf("supervisor: start %s: %w", spec.Command, err)
 		}
 	}
 
-	t := &Task{cmd: cmd, clk: clk, done: make(chan struct{}), pty: stream}
+	t := &Task{cmd: cmd, clk: clk, done: make(chan struct{}), pty: stream, outputRec: rec}
 	go t.reap(startedAt)
 	return t, nil
 }
 
 // reap waits for the child and records the result exactly once.
 func (t *Task) reap(startedAt time.Time) {
-	waitErr := t.cmd.Wait()
+	_ = t.cmd.Wait()
 	if t.pty != nil {
 		// Wait for the pty copy goroutine so the result reflects all output
 		// the child produced, bounded so a grandchild that inherited the
@@ -82,7 +127,7 @@ func (t *Task) reap(startedAt time.Time) {
 		t.pty.drain(t.clk)
 	}
 	t.once.Do(func() {
-		t.result = t.buildResult(startedAt, waitErr)
+		t.result = t.buildResult(startedAt)
 		close(t.done)
 	})
 }
@@ -110,7 +155,7 @@ func (t *Task) Signal(sig os.Signal) error {
 //
 // A task that ended on a signal reports StateSignaled and carries no
 // meaningful exit code, so callers must read State first.
-func (t *Task) buildResult(startedAt time.Time, waitErr error) Result {
+func (t *Task) buildResult(startedAt time.Time) Result {
 	res := Result{Started: startedAt, Ended: t.clk.Now()}
 
 	state := t.cmd.ProcessState
@@ -136,25 +181,11 @@ func (t *Task) buildResult(startedAt time.Time, waitErr error) Result {
 		res.MaxRSSBytes = maxRSSBytes(ru)
 	}
 
-	if t.pty != nil {
-		// The pty copy goroutine runs outside cmd.Wait's own bookkeeping,
-		// so waitErr never carries an output-copy failure for a pty task;
-		// only a sink write failure, captured on t.pty, does. A drain that
-		// hit ptyDrainGrace never reaches here as a failure: the grace only
-		// bounds a lingering grandchild descriptor, not the child's own
-		// output, so it must never populate OutputErr.
-		res.OutputErr = t.pty.writeError()
-		return res
-	}
-
-	// cmd.Wait's error also reports a failure in the goroutine copying the
-	// child's output into the sink. A non-zero exit surfaces here as an
-	// *exec.ExitError, which is a normal outcome already captured above via
-	// State and ExitCode, not an output failure. Anything else is a real
-	// copy error, most commonly a sink write that failed.
-	var exitErr *exec.ExitError
-	if waitErr != nil && !errors.As(waitErr, &exitErr) {
-		res.OutputErr = waitErr
-	}
+	// t.outputRec, not cmd.Wait's own error, is the single source of
+	// OutputErr on both the pipe and pty paths — see the type's doc comment
+	// for why cmd.Wait's error cannot be trusted for this. A drain that hit
+	// ptyDrainGrace on a pty task never affects this: the grace only bounds
+	// a lingering grandchild descriptor, not the child's own output.
+	res.OutputErr = t.outputRec.Err()
 	return res
 }

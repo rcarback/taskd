@@ -91,7 +91,10 @@ func run(args []string, stdout io.Writer) int {
 // failure. The child's exit status and the completeness of the captured log
 // are orthogonal facts, so the exit line never reflects OutputErr.
 func reportResult(stdout io.Writer, id string, res supervisor.Result, written int64) {
-	_, _ = fmt.Fprintf(stdout, "task %s %s exit=%d bytes=%d\n", id, res.State, res.ExitCode, written)
+	// exitCode(res), not the raw res.ExitCode, because ExitCode carries no
+	// meaning for a signaled (or lost, failed, killed) task, and printing
+	// it as-is would report exit=0 for a task a signal killed.
+	_, _ = fmt.Fprintf(stdout, "task %s %s exit=%d bytes=%d\n", id, res.State, exitCode(res), written)
 	if res.OutputErr != nil {
 		_, _ = fmt.Fprintf(stdout, "task %s: captured output is incomplete: %v\n", id, res.OutputErr)
 	}

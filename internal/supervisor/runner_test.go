@@ -98,6 +98,29 @@ func TestOutputCopyFailureSetsOutputErr(t *testing.T) {
 	}
 }
 
+func TestNonZeroExitWithFailingSinkStillSetsOutputErr(t *testing.T) {
+	// os/exec's cmd.Wait sets its returned error to *exec.ExitError as soon
+	// as the child exits non-zero, before it ever looks at a copy
+	// goroutine's error, so a naive OutputErr derived from cmd.Wait's error
+	// alone would silently drop a real sink write failure whenever the
+	// child also happened to exit non-zero.
+	task, err := Start(Spec{Command: "sh", Args: []string{"-c", "echo hello; exit 3"}}, failingWriter{}, clock.System())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	got := task.Wait()
+	if got.State != StateExited {
+		t.Fatalf("State = %q, want %q", got.State, StateExited)
+	}
+	if got.ExitCode != 3 {
+		t.Fatalf("ExitCode = %d, want 3", got.ExitCode)
+	}
+	if got.OutputErr == nil {
+		t.Fatal("OutputErr = nil, want a non-nil error when the sink write fails, even though the child also exited non-zero")
+	}
+}
+
 func TestNonZeroExitLeavesOutputErrNil(t *testing.T) {
 	task, err := Start(Spec{Command: "sh", Args: []string{"-c", "exit 42"}}, &bytes.Buffer{}, clock.System())
 	if err != nil {
@@ -113,6 +136,21 @@ func TestNonZeroExitLeavesOutputErrNil(t *testing.T) {
 	}
 	if got.OutputErr != nil {
 		t.Fatalf("OutputErr = %v, want nil for a normal non-zero exit with a working sink", got.OutputErr)
+	}
+}
+
+func TestResultReportsNonZeroMaxRSS(t *testing.T) {
+	// maxRSSBytes is platform-specific arithmetic (rusage_darwin.go,
+	// rusage_linux.go) that nothing else in this suite exercises against a
+	// real process; this guards against MaxRSSBytes silently staying 0.
+	task, err := Start(Spec{Command: "sh", Args: []string{"-c", "exit 0"}}, &bytes.Buffer{}, clock.System())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	got := task.Wait()
+	if got.MaxRSSBytes <= 0 {
+		t.Fatalf("MaxRSSBytes = %d, want a positive value for a real process", got.MaxRSSBytes)
 	}
 }
 

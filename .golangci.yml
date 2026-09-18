@@ -11,3 +11,13 @@ linters:
     - gosec
     - misspell
     - revive
+    - goheader
+    - forbidigo
+  settings:
+    goheader:
+      template: |-
+        SPDX-License-Identifier: AGPL-3.0-or-later
+    forbidigo:
+      forbid:
+        - pattern: ^time\.Sleep$
+          msg: no time.Sleep — use the fake clock (internal/clock) instead

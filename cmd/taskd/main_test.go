@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,13 @@ func TestRunReportsSignaledExitCode(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "signaled") {
 		t.Fatalf("stdout = %q, want it to mention the signaled state", stdout.String())
+	}
+	// A signaled task's Result.ExitCode carries no meaning; the printed
+	// exit= field must report the process's actual exit code (128+SIGTERM),
+	// not the zero-value ExitCode straight off the Result.
+	wantField := fmt.Sprintf("exit=%d", want)
+	if !strings.Contains(stdout.String(), wantField) {
+		t.Fatalf("stdout = %q, want it to contain %q", stdout.String(), wantField)
 	}
 }
 

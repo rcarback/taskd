@@ -5,10 +5,34 @@ package output
 import (
 	"bytes"
 	"fmt"
+	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// partialWriteFile wraps a real file but caps each Write at n bytes and then
+// reports err, simulating a disk that stops accepting data mid-write
+// (ENOSPC, EFBIG, EIO) — conditions a real file in a test cannot reliably
+// reproduce on demand. The capped bytes still land on the underlying file,
+// matching what a genuine partial write does.
+type partialWriteFile struct {
+	*os.File
+	n   int
+	err error
+}
+
+func (f *partialWriteFile) Write(p []byte) (int, error) {
+	if len(p) <= f.n {
+		return f.File.Write(p)
+	}
+	written, err := f.File.Write(p[:f.n])
+	if err != nil {
+		return written, err
+	}
+	return written, f.err
+}
 
 func open(t *testing.T, maxBytes int64) *Store {
 	t.Helper()
@@ -67,6 +91,31 @@ func TestWrittenCountsEveryByteAcrossRotation(t *testing.T) {
 	want := int64(len(line) * 20)
 	if got := s.Written(); got != want {
 		t.Fatalf("Written() = %d, want %d", got, want)
+	}
+}
+
+func TestAppendAdvancesWrittenByAPartialWriteEvenOnError(t *testing.T) {
+	tmp, err := os.CreateTemp(t.TempDir(), "out.log")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = tmp.Close() })
+
+	s := &Store{
+		path:     tmp.Name(),
+		file:     &partialWriteFile{File: tmp, n: 3, err: fmt.Errorf("disk full")},
+		maxBytes: 1 << 20,
+	}
+
+	if err := s.Append([]byte("0123456789")); err == nil {
+		t.Fatal("Append: want an error from a partial write")
+	}
+
+	// The file only accepted the first 3 bytes before failing; written must
+	// track that, not the 10 bytes the caller asked to append, or a later
+	// ReadSince would read the stream at the wrong offset.
+	if got := s.Written(); got != 3 {
+		t.Fatalf("Written() = %d, want 3 (the bytes actually written before the failure)", got)
 	}
 }
 
@@ -145,6 +194,27 @@ func TestReadSinceRejectsNonPositiveLimit(t *testing.T) {
 		}
 		if next != 0 {
 			t.Fatalf("ReadSince(0, %d): next = %d, want unchanged cursor 0", limit, next)
+		}
+	}
+}
+
+func TestReadSinceRejectsANegativeCursor(t *testing.T) {
+	s := open(t, 1<<20)
+	if err := s.Append([]byte("data\n")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	for _, cursor := range []int64{-1, math.MinInt64} {
+		data, next, truncated, err := s.ReadSince(cursor, 1024)
+		if err == nil {
+			t.Fatalf("ReadSince(%d, 1024): expected error, got data=%q next=%d truncated=%d",
+				cursor, data, next, truncated)
+		}
+		if data != nil {
+			t.Fatalf("ReadSince(%d, 1024): expected nil data on error, got %q", cursor, data)
+		}
+		if next != cursor {
+			t.Fatalf("ReadSince(%d, 1024): next = %d, want unchanged cursor %d", cursor, next, cursor)
 		}
 	}
 }

@@ -7,9 +7,23 @@ package output
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 )
+
+// file is the subset of *os.File that Store uses. Tests substitute a fake
+// to exercise a partial write, which a real file cannot reliably reproduce
+// on demand (it needs conditions such as ENOSPC, EFBIG, or EIO).
+type file interface {
+	io.WriterAt
+	io.ReaderAt
+	Write(p []byte) (int, error)
+	Truncate(size int64) error
+	Seek(offset int64, whence int) (int64, error)
+	Stat() (os.FileInfo, error)
+	Close() error
+}
 
 // Store holds the output of one task.
 //
@@ -18,7 +32,7 @@ import (
 type Store struct {
 	mu       sync.Mutex
 	path     string
-	file     *os.File
+	file     file
 	maxBytes int64
 	written  int64 // total bytes ever appended
 	base     int64 // stream offset of the first byte still on disk
@@ -43,10 +57,15 @@ func (s *Store) Append(p []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.file.Write(p); err != nil {
+	// Advance written by what the file actually accepted, even on error: a
+	// partial write (possible on ENOSPC, EFBIG, or EIO) still landed those
+	// bytes on disk, and written must keep tracking the file's real length
+	// so a later ReadSince keeps reading the stream at the right offset.
+	n, err := s.file.Write(p)
+	s.written += int64(n)
+	if err != nil {
 		return fmt.Errorf("output: write to %s: %w", s.path, err)
 	}
-	s.written += int64(len(p))
 
 	if s.written-s.base > s.maxBytes {
 		if err := s.rotate(); err != nil {
@@ -94,6 +113,9 @@ func (s *Store) Written() int64 {
 func (s *Store) ReadSince(cursor int64, limit int) (data []byte, next int64, truncated int64, err error) {
 	if limit <= 0 {
 		return nil, cursor, 0, fmt.Errorf("output: limit must be positive, got %d", limit)
+	}
+	if cursor < 0 {
+		return nil, cursor, 0, fmt.Errorf("output: cursor must not be negative, got %d", cursor)
 	}
 
 	s.mu.Lock()
