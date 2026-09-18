@@ -12,6 +12,7 @@ import (
 
 	"github.com/rcarback/taskd/internal/clock"
 	"github.com/rcarback/taskd/internal/output"
+	"github.com/rcarback/taskd/internal/paths"
 	"github.com/rcarback/taskd/internal/supervisor"
 	"github.com/rcarback/taskd/internal/taskdir"
 )
@@ -36,7 +37,7 @@ func dispatch(args []string, stdout io.Writer) int {
 func run(args []string, stdout io.Writer) int {
 	fs := flag.NewFlagSet("taskd run", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	root := fs.String("root", defaultRoot(), "directory that holds task records")
+	root := fs.String("root", paths.Root(), "directory that holds task records")
 	noPTY := fs.Bool("no-pty", false, "run without a pseudo-terminal")
 	maxOutput := fs.Int64("max-output", 8<<20, "bytes of output to retain")
 
@@ -134,13 +135,4 @@ func (w storeWriter) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	return len(p), nil
-}
-
-// defaultRoot returns the directory that holds task records.
-func defaultRoot() string {
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		return ".taskd"
-	}
-	return filepath.Join(cache, "taskd")
 }
