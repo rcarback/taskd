@@ -384,7 +384,10 @@ Expected: FAIL, the package does not build because `Strip` returns one value.
 // Package ansi removes terminal escape sequences from captured output.
 package ansi
 
-import "regexp"
+import (
+	"bytes"
+	"regexp"
+)
 
 // escape matches, in order: CSI sequences, OSC sequences ended by BEL or by
 // the string terminator, and two-byte escape sequences. The pattern operates
@@ -402,10 +405,20 @@ var escape = regexp.MustCompile(
 // finished by the end of it: a lone escape, a CSI without its final byte, or
 // an OSC without its terminator. Every alternative is anchored to the end,
 // so a match can only be the buffer's trailing bytes.
+//
+// Each alternative is prefixed with `\x1b*` to absorb any run of bare ESC
+// bytes immediately ahead of the unfinished construct. Without it, FindIndex
+// anchors on the last ESC of such a run and strands the earlier ones just
+// before the trimmed tail, where escape can never match them (a two-byte
+// escape needs a byte after ESC) and they leak into clean unstripped.
+// escByte is the raw ESC byte, dropped from clean after escape and the
+// pending-tail trim have each had a chance to account for it. See Strip.
+var escByte = []byte{0x1b}
+
 var incomplete = regexp.MustCompile(
-	`\x1b$` +
-		`|\x1b\[[0-9;?]*[ -/]*$` +
-		`|\x1b\][^\x07\x1b]*\x1b?$`,
+	`\x1b*\x1b$` +
+		`|\x1b*\x1b\[[0-9;?]*[ -/]*$` +
+		`|\x1b*\x1b\][^\x07\x1b]*\x1b?$`,
 )
 
 // Strip removes terminal escape sequences from b.
@@ -423,7 +436,8 @@ func Strip(b []byte) (clean []byte, pendingLen int) {
 		pendingLen = len(b) - loc[0]
 		b = b[:loc[0]]
 	}
-	return escape.ReplaceAll(b, nil), pendingLen
+	clean = escape.ReplaceAll(b, nil)
+	return bytes.ReplaceAll(clean, escByte, nil), pendingLen
 }
 ```
 
