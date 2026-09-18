@@ -1524,7 +1524,7 @@ git commit -m "Add the daemon listener, dispatch, and task registry"
 **Files:**
 - Create: `internal/client/client.go`
 - Test: `internal/client/client_test.go`
-- Modify: `cmd/taskd/main.go` (add the `serve` and `__child` subcommands)
+- Modify: `cmd/taskd/main.go` (add the `serve` subcommand)
 
 **Interfaces:**
 - Consumes: `proto`, `paths`, `daemon`, `clock`.
@@ -1917,7 +1917,7 @@ git commit -m "Start the daemon implicitly from the client"
 **Files:**
 - Create: `internal/daemon/verbs.go`, `internal/daemon/params.go`
 - Test: `internal/daemon/verbs_test.go`
-- Modify: `cmd/taskd/main.go` (register the handlers in `serve`)
+- Modify: `cmd/taskd/main.go` (register the handlers in `serve`), `internal/output/store.go` (add `Counts`)
 
 **Interfaces:**
 - Consumes: `Registry`, `Entry`, `Handler` from Task 4; `record`, `supervisor`, `output`, `taskdir`.
@@ -3045,7 +3045,7 @@ git commit -m "Add task_read and task_search"
 - Consumes: everything above.
 - Produces:
   - `supervisor.Spec.Stdin bool`, opting a task into an input channel
-  - `(*supervisor.Task).Write(p []byte) (int, error)`
+  - `(*supervisor.Task).Write(p []byte) (int, error)`, `(*supervisor.Task).CloseInput() error`
   - `daemon.SignalParams`, `daemon.SignalResult`, `daemon.WriteParams`, `daemon.WriteResult`
 
 `task_signal` sends SIGTERM, then SIGKILL after a grace period, and the task's terminal state is `killed` rather than `signaled` because taskd asked. `Entry.RequestKill` from Task 6 already carries that.
