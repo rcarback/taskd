@@ -208,3 +208,148 @@ func TestNewLeavesAFinishedRecordAlone(t *testing.T) {
 		t.Fatalf("record changed to %+v, want the finished record untouched", got)
 	}
 }
+
+func TestNewDoesNotReconcileWhenALiveDaemonOwnsTheRoot(t *testing.T) {
+	d, _ := start(t)
+	root := d.Root
+
+	// A record for a task the live daemon still supervises, written
+	// directly rather than through a verb this task does not implement yet
+	// — the same technique TestNewMarksAnOrphanedRunningTaskLost above
+	// uses to set up its precondition.
+	dir := filepath.Join(paths.TasksDir(root), "live")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := record.Save(dir, record.Record{
+		ID:        "live",
+		State:     supervisor.StateRunning,
+		StartedAt: time.Unix(0, 0),
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if _, err := New(root, clock.System()); err == nil {
+		t.Fatal("New succeeded against a root a live daemon already owns, want an error")
+	}
+
+	got, err := record.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.State != supervisor.StateRunning {
+		t.Fatalf("State = %q, want %q: a second New must not touch records the first daemon still owns", got.State, supervisor.StateRunning)
+	}
+}
+
+func TestNewChmodsAnExistingRootTo0700(t *testing.T) {
+	root := shortRoot(t)
+	if err := os.Chmod(root, 0o755); err != nil { //nolint:gosec // deliberately loosening the test root so the assertion below can show New tightens it back to 0700
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	if _, err := New(root, clock.System()); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("root mode = %o, want 700", perm)
+	}
+}
+
+func TestDaemonRecoversFromAHandlerPanic(t *testing.T) {
+	d, sock := start(t)
+	d.Handle(proto.VerbStatus, func(json.RawMessage) (any, error) {
+		panic("boom")
+	})
+
+	res := roundTrip(t, sock, proto.Request{Verb: proto.VerbStatus})
+	if res.OK {
+		t.Fatal("OK = true after a handler panic")
+	}
+	if res.Error == "" {
+		t.Fatal("Error is empty after a handler panic")
+	}
+
+	// The daemon itself must still be alive: an unrelated request on the
+	// same socket still gets an answer.
+	res = roundTrip(t, sock, proto.Request{Verb: "task_nonsense"})
+	if res.OK {
+		t.Fatal("OK = true for an unknown verb")
+	}
+}
+
+func TestServeReturnsPromptlyWithAnIdleConnectionOpen(t *testing.T) {
+	root := shortRoot(t)
+	d, err := New(root, clock.System())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Serve(ctx) }()
+
+	// A client that dials and never writes: Serve must not depend on this
+	// connection closing itself, or on any read deadline, to return once
+	// ctx ends.
+	idle, err := net.Dial("unix", paths.SocketPath(root))
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = idle.Close() }()
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned %v, want nil after cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return within 5s with an idle connection open")
+	}
+}
+
+func TestServeReturnsAndClosesConnectionsWhenAcceptFailsWithoutCancellation(t *testing.T) {
+	root := shortRoot(t)
+	d, err := New(root, clock.System())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	done := make(chan error, 1)
+	go func() { done <- d.Serve(ctx) }()
+
+	// An idle connection open when the accept error hits: the fix must
+	// close it on this path too, not only when ctx ends.
+	idle, err := net.Dial("unix", paths.SocketPath(root))
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = idle.Close() }()
+
+	// Closing the listener directly, without cancelling ctx, simulates a
+	// permanent Accept error unrelated to shutdown — the case the fix
+	// covers: Serve must still close the listener and every open
+	// connection rather than leaking the watcher goroutine and leaving the
+	// socket bound.
+	if err := d.ln.Close(); err != nil {
+		t.Fatalf("ln.Close: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Serve returned nil for an accept error unrelated to context cancellation")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return within 5s after the listener closed out from under it")
+	}
+}

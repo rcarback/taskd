@@ -33,23 +33,33 @@ type Daemon struct {
 	Clk  clock.Clock
 	Reg  *Registry
 
-	ln net.Listener
+	ln    net.Listener
+	conns *connSet
 
 	mu       sync.RWMutex
 	handlers map[proto.Verb]Handler
 }
 
-// New prepares the taskd root, reconciles records left by a previous daemon,
-// and listens on the socket.
+// New prepares the taskd root, listens on the socket, reconciles records
+// left by a previous daemon, and returns.
 //
 // New listens rather than Serve, so a caller knows the socket exists as soon
 // as New returns and a test never races the accept loop.
+//
+// Owning the socket comes before reconcile on purpose: clearStaleSocket
+// below is what detects a daemon still holding this root. Reconciling first
+// would rewrite a live daemon's running records to lost before that daemon
+// was ever discovered, corrupting state that still belongs to it.
 func New(root string, clk clock.Clock) (*Daemon, error) {
 	if err := os.MkdirAll(paths.TasksDir(root), 0o700); err != nil {
 		return nil, fmt.Errorf("daemon: create %s: %w", root, err)
 	}
-	if err := reconcile(root, clk); err != nil {
-		return nil, err
+	// MkdirAll only sets the mode on a directory it creates, so a root left
+	// over with looser permissions (or created by something other than
+	// taskd) would otherwise keep them. The plan's mode guarantee is
+	// unconditional, not just for a fresh root.
+	if err := os.Chmod(root, 0o700); err != nil { //nolint:gosec // 0700 is a directory mode: the execute bit is required for traversal, and this is the plan's own directory mode constraint
+		return nil, fmt.Errorf("daemon: chmod %s: %w", root, err)
 	}
 
 	sock := paths.SocketPath(root)
@@ -65,11 +75,17 @@ func New(root string, clk clock.Clock) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: chmod %s: %w", sock, err)
 	}
 
+	if err := reconcile(root, clk); err != nil {
+		_ = ln.Close()
+		return nil, err
+	}
+
 	return &Daemon{
 		Root:     root,
 		Clk:      clk,
 		Reg:      NewRegistry(),
 		ln:       ln,
+		conns:    newConnSet(),
 		handlers: map[proto.Verb]Handler{},
 	}, nil
 }
@@ -131,14 +147,30 @@ func (d *Daemon) Handle(v proto.Verb, h Handler) {
 }
 
 // Serve accepts connections until ctx ends, then returns nil.
+//
+// Shutdown is bounded rather than left to chance: ending ctx closes the
+// listener so no new connection is accepted, and closes every connection
+// currently open so a client that dialed and never wrote (or a handler
+// deliberately holding a connection open, as a future long poll will)
+// cannot keep this call blocked forever. stop lets the same cleanup run
+// when Serve returns for a reason other than ctx ending — a permanent
+// Accept error — so that path closes the listener and every open
+// connection too, rather than leaking them along with the watcher
+// goroutine below.
 func (d *Daemon) Serve(ctx context.Context) error {
-	go func() {
-		<-ctx.Done()
-		_ = d.ln.Close()
-	}()
-
+	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	defer close(stop)
+
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-stop:
+		}
+		_ = d.ln.Close()
+		d.conns.closeAll()
+	}()
 
 	for {
 		conn, err := d.ln.Accept()
@@ -148,9 +180,17 @@ func (d *Daemon) Serve(ctx context.Context) error {
 			}
 			return fmt.Errorf("daemon: accept: %w", err)
 		}
+		if !d.conns.add(conn) {
+			// closeAll already ran: shutdown started between Accept
+			// returning this connection and it being registered. No later
+			// closeAll call will reach it, so close it here instead.
+			_ = conn.Close()
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer d.conns.remove(conn)
 			d.serveConn(conn)
 		}()
 	}
@@ -168,7 +208,21 @@ func (d *Daemon) serveConn(conn net.Conn) {
 	if err := proto.ReadMessage(conn, &req); err != nil {
 		return
 	}
-	_ = proto.WriteMessage(conn, d.answer(req))
+	_ = proto.WriteMessage(conn, d.safeAnswer(req))
+}
+
+// safeAnswer runs answer, converting a panic inside a handler into an error
+// response instead of letting it unwind out of this goroutine. Task 4
+// registers no handler, but every later task's Handler runs arbitrary code
+// against caller-supplied params; a panic in one request must not take
+// down the process and every task it supervises along with it.
+func (d *Daemon) safeAnswer(req proto.Request) (res proto.Response) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = proto.Response{OK: false, Error: fmt.Sprintf("daemon: handler panic: %v", r)}
+		}
+	}()
+	return d.answer(req)
 }
 
 // answer runs the handler for req and builds the response.
@@ -189,4 +243,51 @@ func (d *Daemon) answer(req proto.Request) proto.Response {
 		return proto.Response{OK: false, Error: fmt.Sprintf("daemon: encode result: %v", err)}
 	}
 	return proto.Response{OK: true, Result: b}
+}
+
+// connSet tracks connections Serve has accepted but not yet finished
+// answering, so shutdown can close them itself rather than waiting on a
+// client or a deadline.
+type connSet struct {
+	mu     sync.Mutex
+	closed bool
+	conns  map[net.Conn]struct{}
+}
+
+// newConnSet returns an empty, open connSet.
+func newConnSet() *connSet {
+	return &connSet{conns: map[net.Conn]struct{}{}}
+}
+
+// add registers conn. It reports false, without registering conn, once
+// closeAll has already run: no later closeAll call will reach it, so the
+// caller must close conn itself in that case.
+func (s *connSet) add(conn net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.conns[conn] = struct{}{}
+	return true
+}
+
+// remove drops conn once its handling goroutine has finished with it.
+func (s *connSet) remove(conn net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.conns, conn)
+}
+
+// closeAll closes every currently open connection and marks the set
+// closed, so any add from this point on refuses and the caller closes the
+// connection itself instead.
+func (s *connSet) closeAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	for conn := range s.conns {
+		_ = conn.Close()
+	}
+	s.conns = nil
 }
