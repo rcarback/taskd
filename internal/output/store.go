@@ -36,6 +36,7 @@ type Store struct {
 	maxBytes int64
 	written  int64 // total bytes ever appended
 	base     int64 // stream offset of the first byte still on disk
+	readOnly bool
 }
 
 // Open creates or truncates the log at path. The file never exceeds maxBytes.
@@ -50,12 +51,35 @@ func Open(path string, maxBytes int64) (*Store, error) {
 	return &Store{path: path, file: f, maxBytes: maxBytes}, nil
 }
 
+// OpenExisting opens a finished task's log for reading only.
+//
+// written and retained come from the task's record. The file holds exactly
+// the last retained bytes of the stream, so the first byte on disk is at
+// stream offset written-retained and every cursor keeps its meaning.
+func OpenExisting(path string, written, retained int64) (*Store, error) {
+	if retained < 0 || written < retained {
+		return nil, fmt.Errorf("output: written=%d retained=%d is not a valid log", written, retained)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY, 0) //nolint:gosec // the caller's own task log
+	if err != nil {
+		return nil, fmt.Errorf("output: open %s: %w", path, err)
+	}
+	return &Store{
+		path: path, file: f, maxBytes: retained + 1,
+		written: written, base: written - retained, readOnly: true,
+	}, nil
+}
+
 // Append writes p to the log, then rotates it if the write pushed the log
 // past its cap. The log can transiently exceed maxBytes between the write
 // and the rotation, but never stays over it once Append returns.
 func (s *Store) Append(p []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.readOnly {
+		return fmt.Errorf("output: %s is open for reading only", s.path)
+	}
 
 	// Advance written by what the file actually accepted, even on error: a
 	// partial write (possible on ENOSPC, EFBIG, or EIO) still landed those

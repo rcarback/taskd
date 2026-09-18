@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -112,6 +113,32 @@ func (e *Entry) AttachTask(task *supervisor.Task) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.task = task
+}
+
+// Log returns a store for reading this task's output, plus a release
+// function the caller must call.
+//
+// A running task uses the live store, which the daemon keeps open, and the
+// release is a no-op. A finished task's store is closed, so this opens the
+// log read-only from the record's byte counts and the release closes it.
+func (e *Entry) Log() (*output.Store, func(), error) {
+	// The store, the record, and the directory come out under ONE
+	// acquisition of the lock. Reading them through LiveStore, Record and
+	// Dir instead would take and drop the lock three times and let Finish
+	// interleave. It would also deadlock outright: this method lives in
+	// registry.go and already holds e.mu, and e.mu is not reentrant.
+	e.mu.Lock()
+	live, rec, dir := e.store, e.rec, e.dir
+	e.mu.Unlock()
+
+	if live != nil {
+		return live, func() {}, nil
+	}
+	s, err := output.OpenExisting(filepath.Join(dir, "out.log"), rec.Written, rec.Retained)
+	if err != nil {
+		return nil, nil, err
+	}
+	return s, func() { _ = s.Close() }, nil
 }
 
 // handles returns the task and its store together under one lock, for the

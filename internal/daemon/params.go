@@ -64,9 +64,54 @@ type StatusResult struct {
 	Tasks []StatusEntry `json:"tasks"`
 }
 
+// ReadParams is task_read's input. Since and Tail are mutually exclusive.
+type ReadParams struct {
+	ID       string `json:"id"`
+	Since    *int64 `json:"since,omitempty"`
+	Tail     *int   `json:"tail,omitempty"`
+	MaxBytes int    `json:"max_bytes,omitempty"`
+}
+
+// ReadResult is task_read's output.
+type ReadResult struct {
+	Data           string `json:"data"`
+	Next           int64  `json:"next"`
+	TruncatedBytes int64  `json:"truncated_bytes"`
+	EOF            bool   `json:"eof"`
+}
+
+// SearchParams is task_search's input.
+type SearchParams struct {
+	ID         string `json:"id"`
+	Regex      string `json:"regex"`
+	Context    int    `json:"context,omitempty"`
+	MaxMatches int    `json:"max_matches,omitempty"`
+}
+
+// Match is one search hit with its surrounding lines.
+type Match struct {
+	LineNumber int      `json:"line_number"`
+	Line       string   `json:"line"`
+	Before     []string `json:"before,omitempty"`
+	After      []string `json:"after,omitempty"`
+}
+
+// SearchResult is task_search's output. More reports that MaxMatches hid
+// further matches.
+type SearchResult struct {
+	Matches        []Match `json:"matches"`
+	TruncatedBytes int64   `json:"truncated_bytes"`
+	More           bool    `json:"more"`
+}
+
 // defaultMaxOutput bounds one task's retained log when the caller sets no
 // limit.
 const defaultMaxOutput = 8 << 20
 
 // defaultOnOutputCap is the only cap behavior Plan 2 implements.
 const defaultOnOutputCap = "rotate"
+
+const (
+	defaultReadBytes  = 64 << 10
+	defaultMaxMatches = 50
+)

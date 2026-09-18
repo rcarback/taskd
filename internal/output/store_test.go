@@ -271,6 +271,78 @@ func TestTailRejectsNonPositiveLines(t *testing.T) {
 	}
 }
 
+func TestOpenExistingReadsARotatedLogAtItsRealOffsets(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.log")
+
+	s, err := Open(path, 64)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	for range 20 {
+		if err := s.Append([]byte("0123456789abcdef\n")); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	written, retained := s.Counts()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ro, err := OpenExisting(path, written, retained)
+	if err != nil {
+		t.Fatalf("OpenExisting: %v", err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+
+	data, next, truncated, err := ro.ReadSince(written-retained, int(retained))
+	if err != nil {
+		t.Fatalf("ReadSince: %v", err)
+	}
+	if int64(len(data)) != retained {
+		t.Fatalf("len(data) = %d, want %d (the whole retained tail)", len(data), retained)
+	}
+	if truncated != 0 {
+		t.Fatalf("truncated = %d, want 0 reading from the first retained byte", truncated)
+	}
+	if next != written {
+		t.Fatalf("next = %d, want %d", next, written)
+	}
+}
+
+func TestOpenExistingRejectsAnInconsistentRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.log")
+	if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if _, err := OpenExisting(path, 10, -1); err == nil {
+		t.Fatal("OpenExisting accepted a negative retained count")
+	}
+	if _, err := OpenExisting(path, 5, 10); err == nil {
+		t.Fatal("OpenExisting accepted retained greater than written")
+	}
+}
+
+func TestOpenExistingStoreRejectsAppend(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.log")
+	if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	ro, err := OpenExisting(path, 4, 4)
+	if err != nil {
+		t.Fatalf("OpenExisting: %v", err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+
+	if err := ro.Append([]byte("more")); err == nil {
+		t.Fatal("Append succeeded on a read-only store")
+	}
+}
+
 // TestReadSinceAcrossRotationMatchesModel guards the reason this package
 // exists: a store that tracked file offsets instead of stream offsets could
 // still pass the tests above (they never check returned byte content past a

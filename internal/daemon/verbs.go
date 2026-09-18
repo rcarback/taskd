@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/rcarback/taskd/internal/ansi"
 	"github.com/rcarback/taskd/internal/output"
 	"github.com/rcarback/taskd/internal/proto"
 	"github.com/rcarback/taskd/internal/record"
@@ -21,6 +24,8 @@ import (
 func (d *Daemon) Register() {
 	d.Handle(proto.VerbStart, jsonHandler(d.start))
 	d.Handle(proto.VerbStatus, jsonHandler(d.status))
+	d.Handle(proto.VerbRead, jsonHandler(d.read))
+	d.Handle(proto.VerbSearch, jsonHandler(d.search))
 }
 
 // saveRecord persists a task's record to disk. It is a variable, not a
@@ -213,6 +218,145 @@ func statusOf(e *Entry) StatusEntry {
 		Written: r.Written, Retained: r.Retained,
 		StartedAt: r.StartedAt, EndedAt: r.EndedAt, OutputErr: r.OutputErr,
 	}
+}
+
+// read returns output by cursor, or the last N lines.
+func (d *Daemon) read(p ReadParams) (ReadResult, error) {
+	if p.Since != nil && p.Tail != nil {
+		return ReadResult{}, fmt.Errorf("daemon: task_read takes since or tail, not both")
+	}
+	e, ok := d.Reg.Get(p.ID)
+	if !ok {
+		return ReadResult{}, fmt.Errorf("daemon: no task %q", p.ID)
+	}
+	store, release, err := e.Log()
+	if err != nil {
+		return ReadResult{}, err
+	}
+	defer release()
+
+	if p.Tail != nil {
+		raw, err := store.Tail(*p.Tail)
+		if err != nil {
+			return ReadResult{}, err
+		}
+		clean, _ := ansi.Strip(raw)
+		written, retained := store.Counts()
+		return ReadResult{
+			Data: string(clean), Next: written,
+			TruncatedBytes: written - retained, EOF: !e.Live(),
+		}, nil
+	}
+
+	cursor := int64(0)
+	if p.Since != nil {
+		cursor = *p.Since
+	}
+	limit := p.MaxBytes
+	if limit <= 0 {
+		limit = defaultReadBytes
+	}
+
+	raw, next, truncated, err := store.ReadSince(cursor, limit)
+	if err != nil {
+		return ReadResult{}, err
+	}
+	clean, pending := ansi.Strip(raw)
+	next = rewind(next, cursor, pending, e.Live())
+
+	return ReadResult{
+		Data: string(clean), Next: next, TruncatedBytes: truncated,
+		EOF: !e.Live() && next >= store.Written(),
+	}, nil
+}
+
+// rewind pulls next back so an escape sequence cut by the read boundary is
+// re-read whole on the next call.
+//
+// A rewind that makes no progress would spin, so a running task simply
+// returns the caller's own cursor and waits for more output. A finished task
+// has no more output, so the unfinished sequence is dropped rather than held
+// forever, which would make EOF unreachable.
+func rewind(next, cursor int64, pending int, live bool) int64 {
+	if pending == 0 {
+		return next
+	}
+	rewound := next - int64(pending)
+	if rewound > cursor {
+		return rewound
+	}
+	if live {
+		return cursor
+	}
+	return next
+}
+
+// search runs a regular expression over the retained log.
+func (d *Daemon) search(p SearchParams) (SearchResult, error) {
+	re, err := regexp.Compile(p.Regex)
+	if err != nil {
+		return SearchResult{}, fmt.Errorf("daemon: task_search regex: %w", err)
+	}
+	e, ok := d.Reg.Get(p.ID)
+	if !ok {
+		return SearchResult{}, fmt.Errorf("daemon: no task %q", p.ID)
+	}
+	store, release, err := e.Log()
+	if err != nil {
+		return SearchResult{}, err
+	}
+	defer release()
+
+	// ReadSince clamps a cursor below base up to base and reports what
+	// rotation discarded, so starting at 0 reads the whole retained log
+	// without reading Written and Retained as two separate, racing counters.
+	_, retained := store.Counts()
+	raw, _, truncated, err := store.ReadSince(0, int(retained)+1)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	clean, _ := ansi.Strip(raw)
+	lines := strings.Split(strings.TrimSuffix(string(clean), "\n"), "\n")
+
+	maxMatches := p.MaxMatches
+	if maxMatches <= 0 {
+		maxMatches = defaultMaxMatches
+	}
+
+	// A non-nil, possibly-empty slice: Go's zero value marshals to JSON
+	// null, and a caller iterating "matches" wants [] when nothing matched,
+	// not null.
+	out := make([]Match, 0, maxMatches)
+	more := false
+	for i, line := range lines {
+		if !re.MatchString(line) {
+			continue
+		}
+		if len(out) == maxMatches {
+			more = true
+			break
+		}
+		out = append(out, Match{
+			LineNumber: i + 1, Line: line,
+			Before: window(lines, i-p.Context, i),
+			After:  window(lines, i+1, i+1+p.Context),
+		})
+	}
+	return SearchResult{Matches: out, TruncatedBytes: truncated, More: more}, nil
+}
+
+// window returns lines[lo:hi], clamped to the slice.
+func window(lines []string, lo, hi int) []string {
+	if lo < 0 {
+		lo = 0
+	}
+	if hi > len(lines) {
+		hi = len(lines)
+	}
+	if lo >= hi {
+		return nil
+	}
+	return append([]string(nil), lines[lo:hi]...)
 }
 
 // storeWriter adapts an output.Store to io.Writer.
