@@ -90,17 +90,51 @@ func TestDispatchRejectsAnUnknownSubcommand(t *testing.T) {
 	}
 }
 
-func TestExitCodeForSignaledReturns128PlusSignal(t *testing.T) {
-	res := supervisor.Result{State: supervisor.StateSignaled, Signal: syscall.SIGKILL}
-	if got, want := exitCode(res), 128+int(syscall.SIGKILL); got != want {
-		t.Fatalf("exitCode(%+v) = %d, want %d", res, got, want)
+func TestExitCodeCoversEveryTerminalState(t *testing.T) {
+	cases := []struct {
+		name string
+		res  supervisor.Result
+		want int
+	}{
+		{
+			name: "exited returns the child's own code",
+			res:  supervisor.Result{State: supervisor.StateExited, ExitCode: 42},
+			want: 42,
+		},
+		{
+			name: "signaled returns 128+signal",
+			res:  supervisor.Result{State: supervisor.StateSignaled, Signal: syscall.SIGKILL},
+			want: 128 + int(syscall.SIGKILL),
+		},
+		{
+			// Reachable only once Plan 2's daemon can lose track of a task
+			// across a restart. ExitCode is the unset zero value here, so
+			// returning it as-is would report success for an outcome that
+			// is genuinely unknown.
+			name: "lost returns 1, not the zero-value ExitCode",
+			res:  supervisor.Result{State: supervisor.StateLost, ExitCode: 0},
+			want: 1,
+		},
+		{
+			name: "failed returns 1, not the zero-value ExitCode",
+			res:  supervisor.Result{State: supervisor.StateFailed, ExitCode: 0},
+			want: 1,
+		},
+		{
+			// StateKilled's eventual convention belongs to Plan 2's kill
+			// caps; for now it must not report success either.
+			name: "killed returns 1, not the zero-value ExitCode",
+			res:  supervisor.Result{State: supervisor.StateKilled, ExitCode: 0},
+			want: 1,
+		},
 	}
-}
 
-func TestExitCodeForExitedReturnsTheChildsCode(t *testing.T) {
-	res := supervisor.Result{State: supervisor.StateExited, ExitCode: 42}
-	if got := exitCode(res); got != 42 {
-		t.Fatalf("exitCode(%+v) = %d, want 42", res, got)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := exitCode(c.res); got != c.want {
+				t.Fatalf("exitCode(%+v) = %d, want %d", c.res, got, c.want)
+			}
+		})
 	}
 }
 

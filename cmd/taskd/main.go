@@ -99,14 +99,28 @@ func reportResult(stdout io.Writer, id string, res supervisor.Result, written in
 
 // exitCode maps a task result to the process exit code.
 //
-// A signaled task's ExitCode carries no meaning, so exitCode reports
-// 128+signal, the shell convention for a process a signal killed. Every
-// other state returns the child's own exit code.
+// Only StateExited carries a meaningful ExitCode. StateSignaled reports
+// 128+signal, the shell convention for a process a signal killed.
+// StateLost, StateFailed, and StateKilled report plain 1: their ExitCode is
+// the unset zero value, and returning it as-is would report success for an
+// outcome that is unknown, never started, or terminated by us. StateLost is
+// unreachable from this command today but becomes live once Plan 2 adds a
+// daemon that can lose track of a task across a restart; StateKilled's
+// eventual convention belongs to Plan 2's kill caps. Both are covered here
+// so exitCode has no wrong answer to fall into later.
 func exitCode(res supervisor.Result) int {
-	if res.State == supervisor.StateSignaled {
+	switch res.State {
+	case supervisor.StateExited:
+		return res.ExitCode
+	case supervisor.StateSignaled:
 		return 128 + int(res.Signal)
+	case supervisor.StateLost, supervisor.StateFailed, supervisor.StateKilled:
+		return 1
+	default:
+		// StateRunning, or any future state Wait never actually returns:
+		// there is still no meaningful exit code to report.
+		return 1
 	}
-	return res.ExitCode
 }
 
 // storeWriter adapts an output.Store to io.Writer.
