@@ -2916,8 +2916,9 @@ func (e *Entry) Log() (*output.Store, func(), error) {
 	// The store, the record, and the directory come out under ONE
 	// acquisition of the lock. Reading them through LiveStore, Record and
 	// Dir instead would take and drop the lock three times and let Finish
-	// interleave. It would also deadlock outright: this method lives in
-	// registry.go and already holds e.mu, and e.mu is not reentrant.
+	// interleave. Those accessors each take e.mu, and e.mu is not
+	// reentrant, so calling one from inside this locked region would
+	// deadlock.
 	e.mu.Lock()
 	live, rec, dir := e.store, e.rec, e.dir
 	e.mu.Unlock()
