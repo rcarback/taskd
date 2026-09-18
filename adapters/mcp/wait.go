@@ -29,7 +29,13 @@ type WaitInput struct {
 // idPattern matches every id taskdir.New's newID produces: a base-36
 // millisecond timestamp, a hyphen, then an unpadded base-32 suffix. Both
 // alphabets, together with the hyphen, fit inside this pattern with room to
-// spare, so nothing legitimate is excluded.
+// spare.
+//
+// By the time an id reaches this check, resolveIDs has already looked it
+// up through the daemon, so it is always one newID produced this pattern
+// was sized for, never a name or a key the caller invented. The check
+// stays anyway: a defence that only runs when you expect it to be
+// unnecessary is the one that catches the case you did not expect.
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 
 // WaitOutput is task_wait's output.
@@ -52,13 +58,15 @@ type WaitOutput struct {
 // It costs two steps and no delivery code, and it rides a notification path
 // the harness already has.
 //
-// ids reaches this function from the tool's caller and is about to be
-// written into a string the agent is told to run as a shell command, so
-// each id is checked against the shape the daemon can actually produce
-// before it is interpolated. An id that does not match is rejected rather
-// than escaped: escaping would still let a caller spell out arbitrary
-// flags to the taskd binary, and nothing legitimate needs a character
-// outside this pattern.
+// ids has already been through resolveIDs by the time it reaches this
+// function, so every entry is a real id the daemon issued, not a name or
+// whatever the caller typed. It is about to be written into a string the
+// agent is told to run as a shell command, so each id is checked again
+// against the shape the daemon can actually produce before it is
+// interpolated. An id that does not match is rejected rather than
+// escaped: escaping would still let a caller spell out arbitrary flags to
+// the taskd binary, and nothing legitimate needs a character outside this
+// pattern.
 //
 // until carries no such check, because it is not the caller's raw text: it
 // is renderUntil's rendering of the conditions ParseUntil already parsed
@@ -123,6 +131,31 @@ func renderUntil(conds []watch.Condition) string {
 	return strings.Join(parts, ",")
 }
 
+// resolveIDs turns the caller's keys — each an id or a name, exactly as
+// Registry.Get accepts for every other verb — into the ids the daemon
+// actually holds, by asking it.
+//
+// The notify path below never otherwise contacts the daemon, so without
+// this call an unknown key, a task with no live tap, or a task that never
+// started would not surface as the error each produces on the blocking
+// path. Instead the agent would receive a successful result carrying a
+// command that fails the instant it runs. And a name, which idPattern
+// rejects, would never reach the daemon at all. Resolving first fixes
+// both: an unknown key now fails here with the daemon's own message, and
+// a name comes back as the id the daemon generated for it.
+func (s *server) resolveIDs(keys []string) ([]string, error) {
+	out, err := call[daemon.StatusParams, daemon.StatusResult](
+		s.root, proto.VerbStatus, daemon.StatusParams{IDs: keys})
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(out.Tasks))
+	for i, task := range out.Tasks {
+		ids[i] = task.ID
+	}
+	return ids, nil
+}
+
 func (s *server) addWait(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "task_wait",
@@ -134,6 +167,10 @@ func (s *server) addWait(srv *mcp.Server) {
 	}, func(
 		_ context.Context, _ *mcp.CallToolRequest, in WaitInput,
 	) (*mcp.CallToolResult, WaitOutput, error) {
+		if len(in.IDs) == 0 {
+			return nil, WaitOutput{}, fmt.Errorf("mcp: task_wait: needs at least one id")
+		}
+
 		var conds []watch.Condition
 		if in.Until != "" {
 			parsed, err := watch.ParseUntil(in.Until)
@@ -147,7 +184,11 @@ func (s *server) addWait(srv *mcp.Server) {
 		// command that exits, so hand back the command rather than
 		// holding the call.
 		if s.harness == HarnessClaudeCode && in.Deliver == "notify" {
-			instr, err := backgroundInstruction(s.root, in.IDs, renderUntil(conds))
+			ids, err := s.resolveIDs(in.IDs)
+			if err != nil {
+				return nil, WaitOutput{}, err
+			}
+			instr, err := backgroundInstruction(s.root, ids, renderUntil(conds))
 			if err != nil {
 				return nil, WaitOutput{}, err
 			}
