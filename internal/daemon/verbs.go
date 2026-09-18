@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -101,7 +102,20 @@ func (d *Daemon) wait(ctx context.Context, p WaitParams) (WaitResult, error) {
 	started := d.Clk.Now()
 	e, err := watch.Wait(ctx, d.Clk, srcs, p.Until)
 	if err != nil {
-		return WaitResult{}, err
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// ctx ended because the peer hung up, or the daemon is
+			// shutting down — see serveConn's per-connection context in
+			// daemon.go. Nobody is left to read an answer either way, so
+			// this returns the bare ctx error rather than building one
+			// for a reply that will never be sent: serveConn checks its
+			// own context before writing and skips the write entirely
+			// once it is done.
+			return WaitResult{}, err
+		}
+		// Every other case — chiefly watch.ErrNoConditionCanFire, matched
+		// through errors.Is rather than message text — is a real answer a
+		// still-connected caller is waiting on, so it is named plainly.
+		return WaitResult{}, fmt.Errorf("daemon: task_wait: %w", err)
 	}
 	blocked := int(d.Clk.Now().Sub(started).Seconds())
 

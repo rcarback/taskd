@@ -281,11 +281,10 @@ func (d *Daemon) Serve(ctx context.Context) error {
 			defer d.conns.remove(conn)
 			// A per-connection context, derived from Serve's own: shutdown
 			// cancels it like every other connection here, and it is also
-			// cancelled the moment this goroutine returns, which bounds a
-			// handler's context to the connection it was given even though
-			// nothing else on this path watches for the peer hanging up
-			// mid-request. A future long poll reads this ctx and returns
-			// instead of holding the goroutine forever.
+			// cancelled the moment this goroutine returns. serveConn derives
+			// a further child from it that additionally ends when the peer
+			// hangs up mid-request, which is what lets a future long poll
+			// notice and return instead of holding this goroutine forever.
 			connCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
 			d.serveConn(connCtx, conn)
@@ -306,6 +305,16 @@ func (d *Daemon) Serve(ctx context.Context) error {
 // any of it, so the connection is still clean and one short error response
 // fits where the real answer did not. That second write can fail too — a
 // client that already hung up — and there is nothing further to say then.
+//
+// While the handler runs, a second goroutine keeps reading from conn to
+// notice the peer hanging up: the protocol carries exactly one message in
+// each direction, and ReadMessage above already consumed it, so nothing
+// legitimate arrives here again. This is the only way a blocking handler —
+// a long poll's task_wait — learns that its caller is gone, since nothing
+// else on this connection watches the socket while the handler is in
+// flight. Reading and writing the same net.Conn from different goroutines
+// at once is safe: the net package documents Conn's methods as callable
+// concurrently.
 func (d *Daemon) serveConn(ctx context.Context, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 
@@ -313,11 +322,65 @@ func (d *Daemon) serveConn(ctx context.Context, conn net.Conn) {
 	if err := proto.ReadMessage(conn, &req); err != nil {
 		return
 	}
-	if err := proto.WriteMessage(conn, d.safeAnswer(ctx, req)); err != nil {
+
+	reqCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	hungUp := make(chan struct{})
+	go func() {
+		defer close(hungUp)
+		readUntilHangUp(conn)
+		cancel()
+	}()
+	defer func() {
+		// Force the Read blocked inside readUntilHangUp to return once
+		// this function is done with conn, so that goroutine does not
+		// outlive the connection. SetReadDeadline is safe to call
+		// concurrently with the Read it targets — see the doc comment
+		// above — and a deadline in the past makes every current and
+		// future Read on conn fail at once, which is what lets this wait
+		// finish promptly rather than for as long as conn happens to stay
+		// open.
+		_ = conn.SetReadDeadline(time.Now())
+		<-hungUp
+	}()
+
+	res := d.safeAnswer(reqCtx, req)
+	if reqCtx.Err() != nil {
+		// The peer hung up while the handler ran, or the daemon started
+		// shutting down: either way nobody is left to read a response, and
+		// conn may already be half or fully closed. Writing one here could
+		// only fail, the same as any other write to a hung-up client (see
+		// the comment on that failure path below) — skip it instead of
+		// building a response nobody will see.
+		return
+	}
+	if err := proto.WriteMessage(conn, res); err != nil {
 		_ = proto.WriteMessage(conn, proto.Response{
 			OK:    false,
 			Error: fmt.Sprintf("daemon: cannot send the %s response: %v", req.Verb, err),
 		})
+	}
+}
+
+// readUntilHangUp blocks until a Read on conn fails, then returns.
+//
+// A successful read is not this connection's peer sending something real —
+// the protocol carries exactly one message in each direction — so it is, at
+// most, a delimiter byte proto.ReadMessage's decoder did not happen to
+// consume from the socket already (in practice it always does: the decoder
+// reads whatever the kernel currently has queued, and the client's request
+// and its trailing newline arrive from one Write call before the client
+// ever reads a response, so they are queued together). Discarding a
+// successful read and continuing, rather than treating it as the signal,
+// keeps this correct even if that assumption ever stops holding, instead of
+// silently giving up on hang-up detection for the rest of the request.
+func readUntilHangUp(conn net.Conn) {
+	buf := make([]byte, 1)
+	for {
+		if _, err := conn.Read(buf); err != nil {
+			return
+		}
 	}
 }
 
