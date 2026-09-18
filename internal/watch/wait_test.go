@@ -107,6 +107,14 @@ func TestWaitIdleReArmsAfterOutput(t *testing.T) {
 
 	fake.BlockUntil(1)
 	fake.Advance(200 * time.Second) // 400s total, but only 200s of silence
+
+	// BlockUntil syncs to the goroutine registering its next timer, which
+	// only happens after it has evaluated this tick and decided not to
+	// fire. Checking ch immediately after Advance, without this sync,
+	// would race the goroutine under test: a single-timer implementation's
+	// send might not have reached ch yet, letting this assertion pass
+	// against exactly the bug it exists to catch.
+	fake.BlockUntil(1)
 	select {
 	case got := <-ch:
 		t.Fatalf("fired after 200s of silence: %+v", got.e)
@@ -199,5 +207,67 @@ func TestWaitRejectsNoSources(t *testing.T) {
 	_, err := watch.Wait(t.Context(), fake, nil, watch.Defaults())
 	if err == nil {
 		t.Fatal("Wait with no sources returned nil, want an error")
+	}
+}
+
+// TestWaitReturnsErrorWhenIdleSourceExits guards the hang Finding 1
+// describes: idle correctly never fires once its source has exited (a task
+// that ended is not a hang), but with only idle armed that used to leave
+// Wait with no live case but ctx.Done and no way to ever return.
+func TestWaitReturnsErrorWhenIdleSourceExits(t *testing.T) {
+	fake := clock.NewFake(time.Unix(0, 0))
+	src := newFakeSource("t1", fake)
+
+	go close(src.done)
+
+	type result struct {
+		e   watch.Event
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		e, err := watch.Wait(t.Context(), fake, []watch.Source{src},
+			[]watch.Condition{{Type: watch.KindIdle, Seconds: 300}})
+		ch <- result{e, err}
+	}()
+
+	select {
+	case got := <-ch:
+		if got.err == nil {
+			t.Fatalf("Wait: got nil error and %+v, want an error: idle must not fire once its source has exited", got.e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not return within 5s: every armed condition retired without firing, so it must not hang")
+	}
+}
+
+// TestWaitReturnsErrorWhenMatchSourceExitsWithoutMatch covers the same
+// class of hang for KindMatch: a Tap has no notion of task end, so nothing
+// ever closes the waiter channel OnMatch returns, and match relied entirely
+// on Wait's retirement to notice its source is gone.
+func TestWaitReturnsErrorWhenMatchSourceExitsWithoutMatch(t *testing.T) {
+	fake := clock.NewFake(time.Unix(0, 0))
+	src := newFakeSource("t1", fake)
+
+	go close(src.done)
+
+	type result struct {
+		e   watch.Event
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		e, err := watch.Wait(t.Context(), fake, []watch.Source{src},
+			[]watch.Condition{{Type: watch.KindMatch, Pattern: `error:`, Name: "err"}})
+		ch <- result{e, err}
+	}()
+
+	select {
+	case got := <-ch:
+		if got.err == nil {
+			t.Fatalf("Wait: got nil error and %+v, want an error: match must not hang once its source has exited without matching", got.e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not return within 5s: every armed condition retired without firing, so it must not hang")
 	}
 }
