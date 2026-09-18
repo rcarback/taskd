@@ -181,6 +181,48 @@ func TestTapLastWriteTracksTheClock(t *testing.T) {
 	}
 }
 
+func TestTapCarriesSplitEscapeSequenceAcrossWrites(t *testing.T) {
+	// An escape sequence split across two Write calls must still be
+	// stripped as one sequence: ansi.Strip reports the trailing,
+	// unfinished bytes as pendingLen, and the tap must carry them into the
+	// next Write via t.pending rather than match them as literal text.
+	var sink bytes.Buffer
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)))
+
+	events, cancel := tap.OnMatch("err", regexp.MustCompile(`^error: boom$`))
+	defer cancel()
+
+	first := []byte("\x1b[3")
+	second := []byte("1merror: boom\x1b[0m\n")
+
+	if _, err := tap.Write(first); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	select {
+	case e := <-events:
+		t.Fatalf("fired before the sequence and the line completed: %+v", e)
+	default:
+	}
+
+	if _, err := tap.Write(second); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	want := append(append([]byte{}, first...), second...)
+	if got := sink.Bytes(); !bytes.Equal(got, want) {
+		t.Errorf("sink holds %q, want the raw bytes %q", got, want)
+	}
+
+	select {
+	case e := <-events:
+		if e.Line != "error: boom" {
+			t.Errorf("Line = %q, want the line stripped and joined across the split", e.Line)
+		}
+	default:
+		t.Fatal("no event: the split escape sequence was not carried into the next write")
+	}
+}
+
 func TestTapCancelUnregisters(t *testing.T) {
 	var sink bytes.Buffer
 	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)))

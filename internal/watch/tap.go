@@ -139,44 +139,58 @@ func (t *Tap) observe(p []byte) {
 	}
 }
 
-// matchLine tests every live matcher against line. The caller holds mu.
+// matchLine tests every live matcher against line and drops any that fires.
+// The caller holds mu.
 //
 // Sending under the lock is safe and deliberate: every waiter channel is
 // buffered for exactly the one event it will ever carry, and the waiter is
 // marked done and closed in the same step, so no send here can block. A
 // later change that unbuffers these channels would deadlock, which is why
 // the buffering is stated rather than assumed.
+//
+// t.matchers is rebuilt in place, keeping only the waiters that did not
+// fire: mutating the slice while ranging over it would skip the entry right
+// after a removed one, so the survivors are collected in a single pass
+// instead of calling dropMatcher mid-range.
 func (t *Tap) matchLine(line string) {
+	live := t.matchers[:0]
 	for _, m := range t.matchers {
-		if m.done {
-			continue
+		if !m.done {
+			if groups := m.re.FindStringSubmatch(line); groups != nil {
+				m.done = true
+				m.ch <- Event{
+					Kind:   KindMatch,
+					Name:   m.name,
+					Line:   line,
+					Groups: append([]string{}, groups[1:]...),
+				}
+				close(m.ch)
+			}
 		}
-		groups := m.re.FindStringSubmatch(line)
-		if groups == nil {
-			continue
+		if !m.done {
+			live = append(live, m)
 		}
-		m.done = true
-		m.ch <- Event{
-			Kind:   KindMatch,
-			Name:   m.name,
-			Line:   line,
-			Groups: append([]string{}, groups[1:]...),
-		}
-		close(m.ch)
 	}
+	t.matchers = live
 }
 
-// countLine fires every counter the new line total reaches. The caller holds
-// mu. See matchLine on why sending under the lock cannot block.
+// countLine fires every counter the new line total reaches and drops it.
+// The caller holds mu. See matchLine on why sending under the lock cannot
+// block, and on why the slice is rebuilt in one pass rather than mutated
+// mid-range.
 func (t *Tap) countLine() {
+	live := t.counters[:0]
 	for _, c := range t.counters {
-		if c.done || t.lines < c.target {
-			continue
+		if !c.done && t.lines >= c.target {
+			c.done = true
+			c.ch <- Event{Kind: KindLines, Count: t.lines}
+			close(c.ch)
 		}
-		c.done = true
-		c.ch <- Event{Kind: KindLines, Count: t.lines}
-		close(c.ch)
+		if !c.done {
+			live = append(live, c)
+		}
 	}
+	t.counters = live
 }
 
 // OnMatch registers a waiter for the first line matching re.
@@ -233,9 +247,11 @@ func (t *Tap) OnLines(n int64) (<-chan Event, func()) {
 	}
 }
 
-// dropMatcher and dropCounter remove a finished waiter so a long-lived task
-// does not accumulate one entry per wait call it ever served. The caller
-// holds mu.
+// dropMatcher and dropCounter remove a waiter that is cancelled before it
+// fires. A fired waiter removes itself in matchLine/countLine, so these
+// exist for the cancel path alone: without them, a caller that cancels
+// instead of waiting for a match would leak the entry for the life of the
+// Tap. The caller holds mu.
 func (t *Tap) dropMatcher(m *matcher) {
 	for i, cur := range t.matchers {
 		if cur == m {
