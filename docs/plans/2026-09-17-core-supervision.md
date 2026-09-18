@@ -375,7 +375,7 @@ git commit -m "Add a controllable clock for time-based tests"
 - Consumes: nothing
 - Produces: `ansi.Strip(b []byte) []byte`, which removes terminal escape sequences and leaves every other byte untouched.
 
-Tasks 4 and 6 call this before matching patterns and before returning text.
+Nothing in this plan calls `Strip`. Plan 2 calls it before matching patterns and before returning text to the agent. Build it now so Plan 2 carries one job instead of two. A missing caller is not a spec gap here.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1526,6 +1526,29 @@ func TestRunRejectsAMissingCommand(t *testing.T) {
 		t.Fatal("run returned 0 for a missing command")
 	}
 }
+
+func TestDispatchRoutesTheRunSubcommand(t *testing.T) {
+	var stdout bytes.Buffer
+
+	code := dispatch([]string{"run", "--root", t.TempDir(), "--no-pty", "--", "sh", "-c", "exit 4"}, &stdout)
+
+	if code != 4 {
+		t.Fatalf("dispatch returned %d, want 4", code)
+	}
+}
+
+func TestDispatchRejectsAnUnknownSubcommand(t *testing.T) {
+	var stdout bytes.Buffer
+
+	code := dispatch([]string{"frobnicate"}, &stdout)
+
+	if code != 2 {
+		t.Fatalf("dispatch returned %d, want 2", code)
+	}
+	if !strings.Contains(stdout.String(), "usage:") {
+		t.Fatalf("stdout = %q, want usage text", stdout.String())
+	}
+}
 ```
 
 - [ ] **Step 6: Run test to verify it fails**
@@ -1559,7 +1582,19 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout))
+	os.Exit(dispatch(os.Args[1:], os.Stdout))
+}
+
+// dispatch routes a subcommand to its handler.
+//
+// main keeps no logic of its own, so tests can drive the same routing without
+// calling os.Exit.
+func dispatch(args []string, stdout io.Writer) int {
+	if len(args) == 0 || args[0] != "run" {
+		fmt.Fprintln(stdout, "usage: taskd run [flags] -- COMMAND [ARGS...]")
+		return 2
+	}
+	return run(args[1:], stdout)
 }
 
 // run supervises one command in the foreground and returns its exit code.
@@ -1645,9 +1680,11 @@ Expected: PASS across every package.
 make build
 ./bin/taskd run -- sh -c 'echo hello; sleep 1; echo done; exit 5'
 echo "exit code: $?"
+./bin/taskd frobnicate
+echo "exit code: $?"
 ```
 
-Expected: the command prints `hello` and `done`, then a line naming the task id with `exited` and `exit=5`, and the shell reports exit code 5.
+Expected: the first command prints `hello` and `done`, then a line naming the task id with `exited` and `exit=5`, and the shell reports exit code 5. The second prints the usage line and reports exit code 2.
 
 - [ ] **Step 10: Commit**
 
