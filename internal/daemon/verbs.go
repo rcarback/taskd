@@ -30,6 +30,12 @@ func (d *Daemon) Register() {
 // exercise its failure deterministically is to substitute the function.
 // await's own save, on the task's eventual real completion, always calls
 // record.Save directly and is never affected by this.
+//
+// Because a test swaps this variable and restores it, no test in this
+// package may call t.Parallel() while the seam exists. Two parallel tests
+// mutating it would race, and the symptom — one test's task_start silently
+// observing another test's injected failure — reads as a flaky assertion
+// rather than as the data race it is.
 var saveRecord = record.Save
 
 // jsonHandler adapts a typed handler into a Handler by decoding its params.
