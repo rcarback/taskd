@@ -106,4 +106,4 @@ cannot answer questions or compact while blocked.
 | `task_read` | Output by cursor, or last N lines |
 | `task_search` | Search the log |
 | `task_signal` | TERM, then KILL after a grace period |
-| `task_write` | Write to standard input |
+| `task_write` | Write to standard input. Needs a pseudo-terminal, which is the default. A task started with `pty: false` has no input channel |
