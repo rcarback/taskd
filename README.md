@@ -3,9 +3,9 @@
 Supervised long-running tasks for coding agents. Wake on exit, silence, or a
 matched pattern instead of polling with `sleep`.
 
-Status: **daemon implemented.** The daemon, its seven verbs, and the wake
-engine exist, along with two CLI subcommands, `run` and `wait`. The design is
-in
+Status: **daemon and MCP adapter implemented.** The daemon, its seven verbs,
+the wake engine, and the MCP adapter exist, along with the `run`, `wait`, and
+`mcp` CLI subcommands. The design is in
 [docs/design/2026-09-17-taskd-design.md](docs/design/2026-09-17-taskd-design.md).
 
 ## The problem
@@ -32,15 +32,17 @@ when something happens.
 
 ```jsonc
 task_start { command: "cargo", args: ["build"], name: "87e-v2",
-             patterns: [{name: "err", regex: "error:", on_match: "notify"}] }
+             patterns: [{name: "err", regex: "error:", on_match: "record"}] }
 
 task_wait  { ids: ["87e-v2"],
-             until: [{type: "exit"}, {type: "idle", seconds: 300}],
+             until: "exit,idle:300",
              deliver: "notify" }
 ```
 
-`task_wait` returns at once. The agent stays free until the task exits, goes
-silent for 300 seconds, or prints an error.
+Under Claude Code, `task_wait` returns at once. The agent stays free until
+the task exits or goes silent for 300 seconds; `task_status` on the same
+task reports whether the `err` pattern matched. See Host support for every
+other harness.
 
 Seven tools: `task_start`, `task_wait`, `task_status`, `task_read`,
 `task_search`, `task_signal`, `task_write`.
@@ -64,7 +66,7 @@ Seven tools: `task_start`, `task_wait`, `task_status`, `task_read`,
 | Host | Wake path | Status |
 |------|-----------|--------|
 | Pi | Extension pushes a turn in process | Adapter not built yet, uses long poll |
-| Claude Code | Background waiter, host notifies on exit | Works today |
+| Claude Code | Background waiter, host notifies on exit | Adapter built, skips the long poll |
 | Codex | `codex queue --thread` | Adapter not built yet, uses long poll |
 
 Long poll works everywhere and always returns a warning, because a blocked

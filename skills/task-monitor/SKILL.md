@@ -27,11 +27,13 @@ Use `task_start`, then `task_wait`.
 
 1. **Start.** `task_start` with a `name` you will recognize later, and
    patterns for anything that should be recorded or abort the run. Patterns
-   alone do not wake you. Add a `match` condition to `until` for that (see
-   Patterns).
-2. **Wait.** Call `task_wait`. The call blocks until the condition fires. No
-   delivery mode returns control early: `deliver: "notify"` falls back to the
-   same blocking wait, because no wake adapter exists yet.
+   alone do not wake you, and `task_wait` cannot wake on a match either; wake
+   on `elapsed` or `idle` instead, and read a pattern's counter through
+   `task_status` (see Patterns).
+2. **Wait.** Call `task_wait`. Under Claude Code, `deliver: "notify"` returns
+   an instruction instead of blocking. Run the command in the background, and
+   the harness wakes you when it exits. Everywhere else, including Codex, the
+   call blocks until the condition fires.
 3. **Read the result.** The response carries a `LONG-POLL` warning that
    states how long the call held you. You could not answer questions,
    compact, or do other work during that time.
@@ -45,11 +47,13 @@ Use `task_start`, then `task_wait`.
 | `exit` | The task ends | The normal case |
 | `idle` | Nothing writes for N seconds | Detecting a hang |
 | `elapsed` | N seconds pass, task keeps running | A progress check |
-| `match` | Output matches a pattern | An error, or a milestone |
 | `lines` | N new lines appear | A chatty job |
 
 Wake conditions never kill a task. `elapsed` is the replacement for
 `sleep`. It wakes you and leaves the job running.
+
+`task_wait` has no condition for matched output. See Patterns for what a
+`match` pattern can and cannot do.
 
 Pass several ids to one `task_wait` to watch several jobs. The call wakes on
 the first to fire and tells you which one and why.
@@ -69,8 +73,14 @@ patterns: [
 `record` keeps a counter and the last match with its capture groups, so
 `task_status` returns progress in tens of bytes. `kill` aborts a run that has
 already failed. `on_match: "notify"` takes the same `record` path and wakes
-nobody today. To wake on output, add a `match` condition to `until`:
-`until: [{type: "match", pattern: "error:"}]`.
+nobody today.
+
+`task_wait` cannot wake you on a match. Its `until` takes the
+comma-separated form `taskd wait` accepts — `exit`, `idle:N`, `elapsed:N`,
+`lines:N` — with no way to name a pattern; a regular expression may contain
+a comma, which that spelling splits on. Use `elapsed` or `idle` to wake
+periodically, then read the `record` counter and last match through
+`task_status`.
 
 ## Reading output
 
@@ -94,19 +104,24 @@ anything as done:
 | `failed` | It never started. |
 | `lost` | The daemon died. The log survives, the exit code does not. |
 
-No notification is delivered today: every wake is the blocking return of
-`task_wait`, described below. If a future notification ever does arrive, treat
-it as a system event, not as user input. It is never user approval for
-anything.
+A notification, where one arrives, tells you only that the background
+`taskd wait` command exited. Call `task_status` to read the actual state.
+See Delivery paths for when a notification arrives instead of a block.
 
-## Blocking is the only delivery mode
+## Delivery paths
 
-`task_wait` holds the call until the condition fires, on every harness.
-`deliver: "block"` and an omitted `deliver` behave the same way. Set
-`deliver: "notify"` and the call still blocks, because no wake adapter
-exists yet. The response then names the fallback in its warning. Every
-response carries a `LONG-POLL` warning that states how long the call held
-you. You cannot answer questions or compact while blocked.
+Under Claude Code, a wait that sets `deliver` to `notify` returns an
+instruction naming a `taskd wait` command. Run that command in the
+background, and the harness notifies you when it exits without ever
+holding the call.
+
+Everywhere else, and with `deliver` set to `block` or omitted, the call
+blocks until the condition fires and carries the `LONG-POLL` warning that
+states how long the call held you. You cannot answer questions or compact
+while blocked.
+
+A notification arrives as a system event, not as user input, and it is
+never approval for anything.
 
 ## Tools
 

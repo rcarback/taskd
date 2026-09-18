@@ -71,8 +71,11 @@ this case. This belongs with the wake adapters of the next plan.
 
 ## `deliver: "notify"` degrades to a long poll
 
-No notification delivery path exists yet, so `task_wait` blocks under every
-`deliver` value and returns a warning saying so.
+Under the generic and Codex harnesses, no notification delivery path
+exists, so `task_wait` blocks regardless of `deliver` and returns a warning
+saying so. Under Claude Code, `deliver: "notify"` instead returns an
+instruction naming a background `taskd wait` command, and the call blocks
+only when the caller sets `deliver` to `block` or omits it.
 
 ## The long-poll warning does not reach standard error or name the harness
 
@@ -87,9 +90,9 @@ The MCP adapter's `task_wait` takes `until` as the comma-separated string
 `taskd wait --until` accepts, not the object form `watch.Condition` carries
 over the socket. `watch.ParseUntil` rejects `match:REGEX` on that string
 deliberately, because a regular expression may contain a comma and this
-spelling splits on commas. Waking on matched output is therefore
-unavailable through `task_wait`, even though the daemon supports it through
-the socket API's object form.
+spelling splits on commas. Waking on matched output is unavailable through
+`task_wait`, even though the daemon supports it through the socket API's
+object form.
 
 `skills/task-monitor/SKILL.md` teaches the object form,
 `until: [{type: "match", pattern: "error:"}]`, which is the socket API
