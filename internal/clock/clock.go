@@ -1,4 +1,3 @@
-// internal/clock/clock.go
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package clock provides a time source that tests can control.

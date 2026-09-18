@@ -1,4 +1,3 @@
-// internal/clock/fake_test.go
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 package clock
@@ -44,6 +43,22 @@ func TestFakeDoesNotFireEarly(t *testing.T) {
 	select {
 	case <-ch:
 		t.Fatal("timer fired one second early")
+	default:
+	}
+}
+
+func TestFakeTimerFiresOnlyOnce(t *testing.T) {
+	c := NewFake(time.Unix(0, 0))
+	ch := c.After(time.Minute)
+	c.Advance(time.Minute)
+
+	if got := <-ch; !got.Equal(time.Unix(0, 0).Add(time.Minute)) {
+		t.Fatalf("timer reported %v, want %v", got, time.Unix(0, 0).Add(time.Minute))
+	}
+
+	select {
+	case got := <-ch:
+		t.Fatalf("timer delivered a second value %v, want no second delivery", got)
 	default:
 	}
 }

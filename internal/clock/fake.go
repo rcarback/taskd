@@ -1,4 +1,3 @@
-// internal/clock/fake.go
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 package clock
@@ -61,6 +60,5 @@ func (f *Fake) Advance(d time.Duration) {
 
 	for _, w := range due {
 		w.ch <- w.at
-		close(w.ch)
 	}
 }
