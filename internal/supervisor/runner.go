@@ -29,6 +29,11 @@ type Task struct {
 	cmd *exec.Cmd
 	clk clock.Clock
 
+	// ptyCopyDone closes once the pseudo-terminal copy goroutine has
+	// drained all output. It is nil for a task started on a plain pipe,
+	// since cmd.Wait already waits for that output copy to finish.
+	ptyCopyDone <-chan struct{}
+
 	once   sync.Once
 	result Result
 	done   chan struct{}
@@ -42,16 +47,25 @@ func Start(spec Spec, sink io.Writer, clk clock.Clock) (*Task, error) {
 	cmd := exec.Command(spec.Command, spec.Args...) //nolint:gosec // running the caller-chosen task command is this package's purpose
 	cmd.Dir = spec.Dir
 	cmd.Env = spec.Env
-	cmd.Stdout = sink
-	cmd.Stderr = sink
 
-	t := &Task{cmd: cmd, clk: clk, done: make(chan struct{})}
 	startedAt := clk.Now()
 
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("supervisor: start %s: %w", spec.Command, err)
+	var ptyCopyDone <-chan struct{}
+	if spec.PTY {
+		copyDone, err := startPTY(cmd, sink)
+		if err != nil {
+			return nil, err
+		}
+		ptyCopyDone = copyDone
+	} else {
+		cmd.Stdout = sink
+		cmd.Stderr = sink
+		if err := cmd.Start(); err != nil {
+			return nil, fmt.Errorf("supervisor: start %s: %w", spec.Command, err)
+		}
 	}
 
+	t := &Task{cmd: cmd, clk: clk, done: make(chan struct{}), ptyCopyDone: ptyCopyDone}
 	go t.reap(startedAt)
 	return t, nil
 }
@@ -59,6 +73,11 @@ func Start(spec Spec, sink io.Writer, clk clock.Clock) (*Task, error) {
 // reap waits for the child and records the result exactly once.
 func (t *Task) reap(startedAt time.Time) {
 	waitErr := t.cmd.Wait()
+	if t.ptyCopyDone != nil {
+		// Wait for the pty copy goroutine so the result reflects all output
+		// the child produced, not just what had landed in sink so far.
+		<-t.ptyCopyDone
+	}
 	t.once.Do(func() {
 		t.result = t.buildResult(startedAt, waitErr)
 		close(t.done)
