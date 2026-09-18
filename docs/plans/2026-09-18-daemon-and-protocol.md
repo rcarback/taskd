@@ -2910,8 +2910,13 @@ Add `readOnly bool` to `Store` and guard `Append`:
 // release is a no-op. A finished task's store is closed, so this opens the
 // log read-only from the record's byte counts and the release closes it.
 func (e *Entry) Log() (*output.Store, func(), error) {
+	// The store, the record, and the directory come out under ONE
+	// acquisition of the lock. Reading them through LiveStore, Record and
+	// Dir instead would take and drop the lock three times and let Finish
+	// interleave. It would also deadlock outright: this method lives in
+	// registry.go and already holds e.mu, and e.mu is not reentrant.
 	e.mu.Lock()
-	live, rec, dir := e.LiveStore(), e.Record(), e.Dir()
+	live, rec, dir := e.store, e.rec, e.dir
 	e.mu.Unlock()
 
 	if live != nil {
@@ -2925,7 +2930,9 @@ func (e *Entry) Log() (*output.Store, func(), error) {
 }
 ```
 
-`finish` already clears `Store` under the entry's lock, and `await` closes it just before calling `finish`. `Log` reads `Store` under the same lock, so it never sees a closed store.
+`Finish` clears `store` under the entry's lock, and `await` closes the store just before calling `Finish`. `Log` reads the field under that same lock, so it never observes a half-updated entry.
+
+One residual race stays open and is accepted: `Log` can return the live store an instant before `await` closes it, and the caller's read then fails on a closed file. The window is the gap between `Log` returning and the caller reading. It is self-healing — by the time the client retries, the entry is finished and `Log` takes the `OpenExisting` path, which succeeds. Do not add reference counting to the store to close it; the cost is not worth a retry-safe error.
 
 - [ ] **Step 5: Write the parameters and handlers**
 
