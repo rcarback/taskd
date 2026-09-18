@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/rcarback/taskd/internal/daemon"
 )
 
 func TestServerRegistersItsTools(t *testing.T) {
@@ -41,5 +43,13 @@ func TestStatusWithNoIDsListsNothingOnAFreshRoot(t *testing.T) {
 	}
 	if res.IsError {
 		t.Fatalf("task_status reported an error: %v", res.Content)
+	}
+
+	out := decodeStructured[daemon.StatusResult](t, res)
+	if out.Tasks == nil {
+		t.Error("task_status returned a nil task list, want an empty one")
+	}
+	if len(out.Tasks) != 0 {
+		t.Errorf("task_status listed %d tasks on a fresh root, want 0", len(out.Tasks))
 	}
 }

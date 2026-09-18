@@ -92,10 +92,7 @@ func newSession(t *testing.T) *mcp.ClientSession {
 // returned, so a direct type assertion couples every test to the SDK's
 // internal representation of that value. A JSON round trip does not.
 //
-// Shared test helper: task_status's own test does not call it, but the
-// pass-through tools a later task in this plan adds do.
-//
-//nolint:unused // see comment above
+// Shared test helper, used by every tool's tests in this package.
 func decodeStructured[T any](t *testing.T, res *mcp.CallToolResult) T {
 	t.Helper()
 	raw, err := json.Marshal(res.StructuredContent)
