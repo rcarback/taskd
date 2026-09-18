@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/rcarback/taskd/internal/proto"
 )
 
 // TestRewind covers every branch of the free function directly: no test in
@@ -258,6 +260,110 @@ func TestReadReachesALiveTaskThroughTheOpenStore(t *testing.T) {
 		t.Fatalf("close fifo writer: %v", err)
 	}
 	waitForState(t, e)
+}
+
+// request encodes v as one verb request.
+func request(t *testing.T, verb proto.Verb, v any) proto.Request {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	return proto.Request{Verb: verb, Params: b}
+}
+
+// TestReadOverTheSocketStaysUnderTheMessageCap goes through the real socket
+// rather than calling the handler, because the defect only appears at the
+// protocol boundary: WriteMessage refuses a response over MaxMessageBytes,
+// and an unclamped read builds one whenever the task produced more than a
+// mebibyte. The client's symptom was "proto: decode: EOF", which names
+// neither the cap nor the verb.
+//
+// The tail path was the worse half: store.Tail is bounded only by the task's
+// retained log, which defaults to 8 MiB.
+func TestReadOverTheSocketStaysUnderTheMessageCap(t *testing.T) {
+	d, sock := start(t)
+	d.Register()
+
+	noPTY := false
+	started := roundTrip(t, sock, request(t, proto.VerbStart, StartParams{
+		Command: "sh", Args: []string{"-c", `head -c 2000000 /dev/zero | tr '\0' 'a'`},
+		PTY: &noPTY,
+	}))
+	if !started.OK {
+		t.Fatalf("task_start: %s", started.Error)
+	}
+	var sr StartResult
+	if err := json.Unmarshal(started.Result, &sr); err != nil {
+		t.Fatalf("decode StartResult: %v", err)
+	}
+	e, _ := d.Reg.Get(sr.ID)
+	waitForState(t, e)
+	if w := e.Record().Written; w < 2_000_000 {
+		t.Fatalf("Written = %d, want the full 2 MB the task produced", w)
+	}
+
+	huge := 1 << 20
+	for _, tc := range []struct {
+		name   string
+		params ReadParams
+	}{
+		{"tail over the whole retained log", ReadParams{ID: sr.ID, Tail: &huge}},
+		{"since with an oversized max_bytes", ReadParams{ID: sr.ID, MaxBytes: 4 << 20}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := roundTrip(t, sock, request(t, proto.VerbRead, tc.params))
+			if !res.OK {
+				t.Fatalf("task_read: %s", res.Error)
+			}
+			var rr ReadResult
+			if err := json.Unmarshal(res.Result, &rr); err != nil {
+				t.Fatalf("decode ReadResult: %v", err)
+			}
+			if len(rr.Data) > maxResultBytes {
+				t.Fatalf("Data is %d bytes, over the %d byte clamp", len(rr.Data), maxResultBytes)
+			}
+			if len(rr.Data) == 0 {
+				t.Fatal("Data is empty: the clamp must return the bytes it can carry, not none")
+			}
+		})
+	}
+}
+
+// TestReadResumesPastTheClampOnTheSinceBranch proves the clamp costs the
+// caller nothing on the cursor path: the bytes it held back are still there
+// on the next call, and eof stays false until they have all been read.
+func TestReadResumesPastTheClampOnTheSinceBranch(t *testing.T) {
+	d := newDaemon(t)
+	noPTY := false
+	got, err := callVerb(t, d, "task_start", StartParams{
+		Command: "sh", Args: []string{"-c", `head -c 2000000 /dev/zero | tr '\0' 'a'`},
+		PTY: &noPTY,
+	})
+	if err != nil {
+		t.Fatalf("task_start: %v", err)
+	}
+	id := got.(StartResult).ID
+	e, _ := d.Reg.Get(id)
+	waitForState(t, e)
+
+	total := 0
+	cursor := int64(0)
+	for range 64 {
+		res, err := callVerb(t, d, "task_read", ReadParams{ID: id, Since: &cursor, MaxBytes: 4 << 20})
+		if err != nil {
+			t.Fatalf("task_read: %v", err)
+		}
+		rr := res.(ReadResult)
+		total += len(rr.Data)
+		cursor = rr.Next
+		if rr.EOF {
+			break
+		}
+	}
+	if want := int(e.Record().Written); total != want {
+		t.Fatalf("read %d bytes across the clamped calls, want all %d", total, want)
+	}
 }
 
 func TestReadRejectsBothSinceAndTail(t *testing.T) {

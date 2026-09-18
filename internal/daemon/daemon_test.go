@@ -126,6 +126,28 @@ func TestDaemonReportsAHandlerError(t *testing.T) {
 	}
 }
 
+// TestDaemonReportsAResponseItCannotSend covers the write half of the
+// protocol cap. A handler can return a value that encodes past
+// proto.MaxMessageBytes; dropping the write error closed the connection with
+// nothing on it, and the client's only symptom was "proto: decode: EOF".
+func TestDaemonReportsAResponseItCannotSend(t *testing.T) {
+	d, sock := start(t)
+	d.Handle(proto.VerbStatus, func(json.RawMessage) (any, error) {
+		return strings.Repeat("a", proto.MaxMessageBytes+1), nil
+	})
+
+	res := roundTrip(t, sock, proto.Request{Verb: proto.VerbStatus})
+	if res.OK {
+		t.Fatal("OK = true for a response the daemon could not send")
+	}
+	if !strings.Contains(res.Error, string(proto.VerbStatus)) {
+		t.Fatalf("Error = %q, want it to name the verb", res.Error)
+	}
+	if !strings.Contains(res.Error, "limit") {
+		t.Fatalf("Error = %q, want it to name the size limit", res.Error)
+	}
+}
+
 func TestDaemonSurvivesAMalformedRequest(t *testing.T) {
 	_, sock := start(t)
 

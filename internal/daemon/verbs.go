@@ -311,6 +311,13 @@ func (d *Daemon) read(p ReadParams) (ReadResult, error) {
 		if err != nil {
 			return ReadResult{}, err
 		}
+		// store.Tail is bounded only by the retained log, which defaults to
+		// 8 MiB, so an unclamped tail builds a response the protocol refuses
+		// to carry. Keep the most recent bytes: a tail read is a snapshot of
+		// the end of the stream, so the end is the part worth keeping.
+		if len(raw) > maxResultBytes {
+			raw = raw[len(raw)-maxResultBytes:]
+		}
 		clean, _ := ansi.Strip(raw)
 		written, retained := store.Counts()
 		// Next always jumps to the end of the stream, even for a task still
@@ -331,6 +338,12 @@ func (d *Daemon) read(p ReadParams) (ReadResult, error) {
 	limit := p.MaxBytes
 	if limit <= 0 {
 		limit = defaultReadBytes
+	}
+	// A max_bytes the protocol cannot carry becomes one it can, rather than a
+	// response the client never receives. Next still advances, so the caller
+	// reads the rest on its following call.
+	if limit > maxResultBytes {
+		limit = maxResultBytes
 	}
 
 	raw, next, truncated, err := store.ReadSince(cursor, limit)

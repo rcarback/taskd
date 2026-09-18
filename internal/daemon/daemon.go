@@ -281,6 +281,14 @@ func (d *Daemon) Serve(ctx context.Context) error {
 // A failure to read the request is the client's problem and cannot be
 // reported to it, so the connection simply closes. A failure in the handler
 // is reported in the response.
+//
+// A failure to write the response usually means the answer itself is over the
+// protocol's size cap. Dropping it closed the connection with nothing on it
+// and left the client holding "proto: decode: EOF", which names neither the
+// cap nor the verb. WriteMessage rejects an oversize message before it writes
+// any of it, so the connection is still clean and one short error response
+// fits where the real answer did not. That second write can fail too — a
+// client that already hung up — and there is nothing further to say then.
 func (d *Daemon) serveConn(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 
@@ -288,7 +296,12 @@ func (d *Daemon) serveConn(conn net.Conn) {
 	if err := proto.ReadMessage(conn, &req); err != nil {
 		return
 	}
-	_ = proto.WriteMessage(conn, d.safeAnswer(req))
+	if err := proto.WriteMessage(conn, d.safeAnswer(req)); err != nil {
+		_ = proto.WriteMessage(conn, proto.Response{
+			OK:    false,
+			Error: fmt.Sprintf("daemon: cannot send the %s response: %v", req.Verb, err),
+		})
+	}
 }
 
 // safeAnswer runs answer, converting a panic inside a handler into an error

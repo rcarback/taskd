@@ -2,7 +2,11 @@
 
 package daemon
 
-import "time"
+import (
+	"time"
+
+	"github.com/rcarback/taskd/internal/proto"
+)
 
 // StartParams is task_start's input.
 //
@@ -160,6 +164,19 @@ const (
 	defaultReadBytes  = 64 << 10
 	defaultMaxMatches = 50
 )
+
+// maxResultBytes caps the log bytes one task_read result may carry.
+//
+// proto.MaxMessageBytes caps the whole encoded response, and JSON escaping
+// can cost up to six characters per byte for control-heavy output, so the
+// clamp sits an eighth under the protocol cap. Without it a tail read over a
+// large retained log, or a max_bytes above the cap, builds a response
+// WriteMessage refuses, and the client sees only "proto: decode: EOF".
+//
+// A since read resumes from Next, so the clamp only ever splits a read across
+// more calls. A tail read reports the end of the stream either way, so the
+// clamp narrows its window to the most recent bytes.
+const maxResultBytes = proto.MaxMessageBytes / 8
 
 // defaultGraceSeconds is how long a task has to exit on SIGTERM before
 // taskd sends SIGKILL.
