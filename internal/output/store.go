@@ -30,9 +30,18 @@ type file interface {
 // Callers address the log by absolute stream offset. Offsets keep counting
 // across rotation, so a cursor stays meaningful after old bytes are dropped.
 type Store struct {
-	mu       sync.Mutex
-	path     string
-	file     file
+	mu   sync.Mutex
+	path string
+	file file
+	// maxBytes means two different things depending on which constructor
+	// built this Store. Open sets it to a policy the caller chose — the
+	// task's max_output, or the daemon's default — and Append enforces it,
+	// rotating the log whenever a write pushes past it. OpenExisting sets it
+	// instead to a measurement of the bytes already retained on disk, plus
+	// one; nothing enforces that value, because the readOnly guard in Append
+	// stops rotate from ever running against such a Store. Only the Open
+	// meaning is ever a real limit. See OpenExisting and rotate for why the
+	// other value exists and why it is safe to leave unenforced.
 	maxBytes int64
 	written  int64 // total bytes ever appended
 	base     int64 // stream offset of the first byte still on disk
@@ -64,13 +73,14 @@ func OpenExisting(path string, written, retained int64) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("output: open %s: %w", path, err)
 	}
-	// maxBytes is not a cap here: the readOnly guard in Append means rotate
-	// can never run against this Store, so the field is otherwise unused.
-	// retained+1 exists only to keep maxBytes positive when retained is 0 (a
-	// task with no output), satisfying the precondition Open enforces on
-	// every other Store. Do not read this field expecting the task's real
-	// max_output — record.Record does not persist that value, so a reopened
-	// log has no way to recover it.
+	// maxBytes: retained+1 is not a cap. Open requires maxBytes > 0, and
+	// retained alone is 0 for a task that produced no output, so retained+1
+	// keeps this Store satisfying that same precondition. The value is never
+	// consulted as a limit: Append refuses outright on a read-only Store, so
+	// rotate — the only code that reads maxBytes as a cap — can never run
+	// here. Do not read this field expecting the task's real max_output
+	// either; record.Record does not persist that value, so a reopened log
+	// has no way to recover it.
 	return &Store{
 		path: path, file: f, maxBytes: retained + 1,
 		written: written, base: written - retained, readOnly: true,
@@ -107,6 +117,14 @@ func (s *Store) Append(p []byte) error {
 }
 
 // rotate discards the oldest half of the retained log. The caller holds s.mu.
+//
+// Append is rotate's only call site, and Append already refuses to run on a
+// read-only Store, so rotate only ever sees the policy meaning of maxBytes
+// (see the field's doc comment), never OpenExisting's retained+1
+// measurement. That matters here: a Store built with maxBytes == 1 — the
+// value OpenExisting uses for a task with no output — would compute keep ==
+// 0 below, and start would land on s.written, discarding the entire log.
+// The readOnly guard is what keeps that from ever happening.
 func (s *Store) rotate() error {
 	keep := s.maxBytes / 2
 	start := s.written - keep
