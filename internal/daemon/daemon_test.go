@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,6 +241,57 @@ func TestNewDoesNotReconcileWhenALiveDaemonOwnsTheRoot(t *testing.T) {
 	}
 	if got.State != supervisor.StateRunning {
 		t.Fatalf("State = %q, want %q: a second New must not touch records the first daemon still owns", got.State, supervisor.StateRunning)
+	}
+}
+
+// TestNewRefusesARootAnotherProcessHasLocked proves the root lock, and not
+// the dial probe, is what stops a second daemon: nothing is listening on this
+// root and no socket file exists at all, so the probe would let New straight
+// through. The assertion that no socket appeared is the point — it shows New
+// failed before clearStaleSocket, which is the ordering that closes the
+// unlink-versus-bind window.
+func TestNewRefusesARootAnotherProcessHasLocked(t *testing.T) {
+	root := shortRoot(t)
+	if err := os.MkdirAll(paths.TasksDir(root), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	// A stand-in for the daemon that already owns this root. flock is tied to
+	// the open file description, so a second open in this same process is a
+	// separate holder exactly as another process would be.
+	held, err := lockRoot(root)
+	if err != nil {
+		t.Fatalf("lockRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+
+	if _, err := New(root, clock.System()); err == nil {
+		t.Fatal("New succeeded on a root another holder has locked, want an error")
+	} else if !strings.Contains(err.Error(), root) {
+		t.Fatalf("error = %q, want it to name the root %q", err, root)
+	}
+
+	if _, err := os.Stat(paths.SocketPath(root)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Stat(socket) = %v, want it never created: New must fail before it touches the socket", err)
+	}
+
+	// Releasing the lock hands the root back, with no reaper and no
+	// stale-PID logic: this is what a crashed daemon leaves behind.
+	if err := held.Close(); err != nil {
+		t.Fatalf("release the lock: %v", err)
+	}
+	if _, err := New(root, clock.System()); err != nil {
+		t.Fatalf("New after the lock was released: %v", err)
+	}
+}
+
+func TestNewTwiceOnOneRootFailsTheSecondTime(t *testing.T) {
+	root := shortRoot(t)
+	if _, err := New(root, clock.System()); err != nil {
+		t.Fatalf("first New: %v", err)
+	}
+	if _, err := New(root, clock.System()); err == nil {
+		t.Fatal("a second New on the same root succeeded, want an error: one daemon owns one root")
 	}
 }
 

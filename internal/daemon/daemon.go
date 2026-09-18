@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/rcarback/taskd/internal/clock"
@@ -35,6 +36,9 @@ type Daemon struct {
 
 	ln    net.Listener
 	conns *connSet
+	// lock is held for the whole life of this daemon and proves no other
+	// daemon owns this root. Serve releases it where it closes the listener.
+	lock *os.File
 
 	mu       sync.RWMutex
 	handlers map[proto.Verb]Handler
@@ -46,10 +50,19 @@ type Daemon struct {
 // New listens rather than Serve, so a caller knows the socket exists as soon
 // as New returns and a test never races the accept loop.
 //
-// Owning the socket comes before reconcile on purpose: clearStaleSocket
-// below is what detects a daemon still holding this root. Reconciling first
-// would rewrite a live daemon's running records to lost before that daemon
-// was ever discovered, corrupting state that still belongs to it.
+// Taking the root lock comes first, and it is what carries the one-daemon-
+// per-root invariant. A dial probe cannot carry it: clearStaleSocket unlinks
+// the socket path, and unlinking a bound Unix socket and binding a fresh one
+// leaves both listeners alive, so two daemons that probe before either binds
+// both proceed and the second unlinks the first's socket out from under it.
+// Both would then reconcile the same records and allocate task directories
+// under the same tree. With the lock held across clearStaleSocket, Listen,
+// and reconcile, the only process that can sit between the unlink and the
+// bind is the one holding the lock.
+//
+// Owning the socket still comes before reconcile: reconciling first would
+// rewrite a live daemon's running records to lost before that daemon was
+// ever discovered, corrupting state that still belongs to it.
 func New(root string, clk clock.Clock) (*Daemon, error) {
 	if err := os.MkdirAll(paths.TasksDir(root), 0o700); err != nil {
 		return nil, fmt.Errorf("daemon: create %s: %w", root, err)
@@ -62,21 +75,30 @@ func New(root string, clk clock.Clock) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: chmod %s: %w", root, err)
 	}
 
+	lock, err := lockRoot(root)
+	if err != nil {
+		return nil, err
+	}
+
 	sock := paths.SocketPath(root)
 	if err := clearStaleSocket(sock); err != nil {
+		_ = lock.Close()
 		return nil, err
 	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
+		_ = lock.Close()
 		return nil, fmt.Errorf("daemon: listen on %s: %w", sock, err)
 	}
 	if err := os.Chmod(sock, 0o600); err != nil {
 		_ = ln.Close()
+		_ = lock.Close()
 		return nil, fmt.Errorf("daemon: chmod %s: %w", sock, err)
 	}
 
 	if err := reconcile(root, clk); err != nil {
 		_ = ln.Close()
+		_ = lock.Close()
 		return nil, err
 	}
 
@@ -86,8 +108,47 @@ func New(root string, clk clock.Clock) (*Daemon, error) {
 		Reg:      NewRegistry(),
 		ln:       ln,
 		conns:    newConnSet(),
+		lock:     lock,
 		handlers: map[proto.Verb]Handler{},
 	}, nil
+}
+
+// lockRoot takes the exclusive, non-blocking flock that makes this process
+// the one daemon for root. The returned file must stay open: closing it
+// releases the lock.
+//
+// The lock is advisory and tied to the open file description, so the kernel
+// releases it when the holder dies. A daemon that crashes frees its root with
+// no reaper and no stale-PID logic.
+//
+// The raw syscall runs through SyscallConn rather than against f.Fd(): Fd
+// returns only a descriptor number, and nothing ties that number's validity
+// to the call using it, while Control keeps the descriptor valid for the
+// duration of the callback. internal/client's own flock helper does the same
+// for the client's separate lock, and carries the longer note.
+func lockRoot(root string) (*os.File, error) {
+	path := paths.DaemonLockPath(root)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // path is paths.DaemonLockPath(root), not untrusted input
+	if err != nil {
+		return nil, fmt.Errorf("daemon: open %s: %w", path, err)
+	}
+	sc, err := f.SyscallConn()
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("daemon: lock %s: %w", path, err)
+	}
+	var opErr error
+	if err := sc.Control(func(fd uintptr) {
+		opErr = syscall.Flock(int(fd), syscall.LOCK_EX|syscall.LOCK_NB)
+	}); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("daemon: lock %s: %w", path, err)
+	}
+	if opErr != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("daemon: another daemon already owns %s: %w", root, opErr)
+	}
+	return f, nil
 }
 
 // reconcile marks every task that a previous daemon left running as lost.
@@ -119,6 +180,11 @@ func reconcile(root string, clk clock.Clock) error {
 // A live daemon answers a dial, so a successful dial means this process must
 // not take the address. Anything else means the file is left over from a
 // daemon that died, and Listen would fail on it.
+//
+// This is a second opinion, not the proof of sole ownership: the root lock
+// New holds before calling this is what carries that invariant. The probe
+// still earns its place by naming a reachable daemon in the error rather than
+// reporting only that the lock was taken.
 func clearStaleSocket(sock string) error {
 	conn, err := net.DialTimeout("unix", sock, time.Second)
 	if err == nil {
@@ -157,19 +223,33 @@ func (d *Daemon) Handle(v proto.Verb, h Handler) {
 // Accept error — so that path closes the listener and every open
 // connection too, rather than leaking them along with the watcher
 // goroutine below.
+//
+// The watcher is in wg, so Serve does not return until it has finished. The
+// defer ordering makes that safe: close(stop) runs before wg.Wait(), so the
+// watcher is already released when Serve waits for it. Without the join, the
+// watcher could still be between close(stop) and ln.Close after Serve
+// returned, and a caller that immediately built a new daemon on the same root
+// would find the old listener still bound and the root lock still held.
 func (d *Daemon) Serve(ctx context.Context) error {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	defer close(stop)
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		select {
 		case <-ctx.Done():
 		case <-stop:
 		}
 		_ = d.ln.Close()
 		d.conns.closeAll()
+		// Releasing the root lock last: every path that could still touch
+		// this root — an in-flight handler on a connection closeAll just
+		// closed — is on its way out, and the next daemon must not take the
+		// root until the listener is unbound.
+		_ = d.lock.Close()
 	}()
 
 	for {
