@@ -113,9 +113,17 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 		return StartResult{}, err
 	}
 
+	// A non-PTY task gets no stdin pipe, so os/exec hands it /dev/null and a
+	// task that reads standard input sees end of input at once. Opting it
+	// into Spec.Stdin instead would give every such task a pipe that nothing
+	// on this plan's API can ever close: no verb closes input, so a task
+	// reading stdin would block forever and hold its name against reuse until
+	// a client signalled it. Input belongs to the pseudo-terminal path, which
+	// is the default, and task_write reports the missing channel by name for
+	// a task that opted out of it.
 	task, err := supervisor.Start(supervisor.Spec{
 		Command: p.Command, Args: p.Args, Dir: p.Cwd,
-		Env: os.Environ(), PTY: usePTY, Stdin: !usePTY,
+		Env: os.Environ(), PTY: usePTY,
 	}, storeWriter{store}, d.Clk)
 	if err != nil {
 		_ = store.Close()
