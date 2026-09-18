@@ -85,7 +85,6 @@ func Run(ctx context.Context, root string, h Harness) error {
 // StatusInput is task_status's input. With no ids it lists every task.
 type StatusInput struct {
 	IDs []string `json:"ids,omitempty" jsonschema:"task ids to report; omit to list every task"`
-	All bool     `json:"all,omitempty"  jsonschema:"include tasks that have already ended"`
 }
 
 // addStatus registers task_status.
@@ -102,7 +101,6 @@ func (s *server) addStatus(srv *mcp.Server) {
 			s.root, proto.VerbStatus, daemon.StatusParams{
 				IDs:     in.IDs,
 				Session: "",
-				All:     in.All,
 			})
 		return nil, out, err
 	})
