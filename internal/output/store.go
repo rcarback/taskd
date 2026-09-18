@@ -36,7 +36,9 @@ func Open(path string, maxBytes int64) (*Store, error) {
 	return &Store{path: path, file: f, maxBytes: maxBytes}, nil
 }
 
-// Append writes p to the log, rotating first if the log would exceed its cap.
+// Append writes p to the log, then rotates it if the write pushed the log
+// past its cap. The log can transiently exceed maxBytes between the write
+// and the rotation, but never stays over it once Append returns.
 func (s *Store) Append(p []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -88,8 +90,12 @@ func (s *Store) Written() int64 {
 
 // ReadSince returns up to limit bytes starting at cursor. next is the cursor
 // for the following call. truncated reports bytes that rotation discarded
-// before the first byte returned.
+// before the first byte returned. limit must be positive.
 func (s *Store) ReadSince(cursor int64, limit int) (data []byte, next int64, truncated int64, err error) {
+	if limit <= 0 {
+		return nil, cursor, 0, fmt.Errorf("output: limit must be positive, got %d", limit)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -112,10 +118,19 @@ func (s *Store) ReadSince(cursor int64, limit int) (data []byte, next int64, tru
 	return buf, cursor + n, truncated, nil
 }
 
-// Tail returns the last n lines still held on disk.
+// Tail returns the last n lines still held on disk. lines must be positive.
+// An empty log is not an error: Tail returns nil, nil.
 func (s *Store) Tail(lines int) ([]byte, error) {
+	if lines <= 0 {
+		return nil, fmt.Errorf("output: lines must be positive, got %d", lines)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.written == s.base {
+		return nil, nil
+	}
 
 	buf := make([]byte, s.written-s.base)
 	if _, err := s.file.ReadAt(buf, 0); err != nil {
