@@ -16,12 +16,28 @@ type waiter struct {
 // Fake is a Clock that only moves when Advance is called.
 type Fake struct {
 	mu      sync.Mutex
+	cond    *sync.Cond
 	now     time.Time
 	waiters []*waiter
 }
 
 // NewFake returns a Fake positioned at start.
-func NewFake(start time.Time) *Fake { return &Fake{now: start} }
+func NewFake(start time.Time) *Fake {
+	f := &Fake{now: start}
+	f.cond = sync.NewCond(&f.mu)
+	return f
+}
+
+// BlockUntil blocks until n timers are registered on the clock. A test uses
+// it to synchronize with a goroutine that calls After, so a later Advance
+// can never race a registration that has not happened yet.
+func (f *Fake) BlockUntil(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for len(f.waiters) < n {
+		f.cond.Wait()
+	}
+}
 
 // Now reports the current fake time.
 func (f *Fake) Now() time.Time {
@@ -36,6 +52,7 @@ func (f *Fake) After(d time.Duration) <-chan time.Time {
 	defer f.mu.Unlock()
 	w := &waiter{at: f.now.Add(d), ch: make(chan time.Time, 1)}
 	f.waiters = append(f.waiters, w)
+	f.cond.Broadcast()
 	return w.ch
 }
 

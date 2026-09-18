@@ -29,10 +29,12 @@ type Task struct {
 	cmd *exec.Cmd
 	clk clock.Clock
 
-	// ptyCopyDone closes once the pseudo-terminal copy goroutine has
-	// drained all output. It is nil for a task started on a plain pipe,
-	// since cmd.Wait already waits for that output copy to finish.
-	ptyCopyDone <-chan struct{}
+	// pty is set only for a task started on a pseudo-terminal. It carries
+	// the copy goroutine's done channel, the master to bound a wait on a
+	// lingering grandchild, and any sink write error. It is nil for a task
+	// started on a plain pipe, since cmd.Wait already waits for that output
+	// copy to finish and reports any of its errors directly.
+	pty *ptyStream
 
 	once   sync.Once
 	result Result
@@ -50,13 +52,13 @@ func Start(spec Spec, sink io.Writer, clk clock.Clock) (*Task, error) {
 
 	startedAt := clk.Now()
 
-	var ptyCopyDone <-chan struct{}
+	var stream *ptyStream
 	if spec.PTY {
-		copyDone, err := startPTY(cmd, sink)
+		s, err := startPTY(cmd, sink)
 		if err != nil {
 			return nil, err
 		}
-		ptyCopyDone = copyDone
+		stream = s
 	} else {
 		cmd.Stdout = sink
 		cmd.Stderr = sink
@@ -65,7 +67,7 @@ func Start(spec Spec, sink io.Writer, clk clock.Clock) (*Task, error) {
 		}
 	}
 
-	t := &Task{cmd: cmd, clk: clk, done: make(chan struct{}), ptyCopyDone: ptyCopyDone}
+	t := &Task{cmd: cmd, clk: clk, done: make(chan struct{}), pty: stream}
 	go t.reap(startedAt)
 	return t, nil
 }
@@ -73,10 +75,11 @@ func Start(spec Spec, sink io.Writer, clk clock.Clock) (*Task, error) {
 // reap waits for the child and records the result exactly once.
 func (t *Task) reap(startedAt time.Time) {
 	waitErr := t.cmd.Wait()
-	if t.ptyCopyDone != nil {
+	if t.pty != nil {
 		// Wait for the pty copy goroutine so the result reflects all output
-		// the child produced, not just what had landed in sink so far.
-		<-t.ptyCopyDone
+		// the child produced, bounded so a grandchild that inherited the
+		// pty slave and outlived the child cannot hang this forever.
+		t.pty.drain(t.clk)
 	}
 	t.once.Do(func() {
 		t.result = t.buildResult(startedAt, waitErr)
@@ -131,6 +134,17 @@ func (t *Task) buildResult(startedAt time.Time, waitErr error) Result {
 
 	if ru, ok := state.SysUsage().(*syscall.Rusage); ok {
 		res.MaxRSSBytes = maxRSSBytes(ru)
+	}
+
+	if t.pty != nil {
+		// The pty copy goroutine runs outside cmd.Wait's own bookkeeping,
+		// so waitErr never carries an output-copy failure for a pty task;
+		// only a sink write failure, captured on t.pty, does. A drain that
+		// hit ptyDrainGrace never reaches here as a failure: the grace only
+		// bounds a lingering grandchild descriptor, not the child's own
+		// output, so it must never populate OutputErr.
+		res.OutputErr = t.pty.writeError()
+		return res
 	}
 
 	// cmd.Wait's error also reports a failure in the goroutine copying the

@@ -47,6 +47,24 @@ func TestFakeDoesNotFireEarly(t *testing.T) {
 	}
 }
 
+func TestFakeBlockUntilWaitsForRegistration(t *testing.T) {
+	c := NewFake(time.Unix(0, 0))
+	done := make(chan struct{})
+
+	go func() {
+		c.BlockUntil(1)
+		close(done)
+	}()
+
+	c.After(time.Minute)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("BlockUntil did not return once a timer registered")
+	}
+}
+
 func TestFakeTimerFiresOnlyOnce(t *testing.T) {
 	c := NewFake(time.Unix(0, 0))
 	ch := c.After(time.Minute)
