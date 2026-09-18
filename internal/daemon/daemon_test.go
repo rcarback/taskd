@@ -21,11 +21,31 @@ import (
 
 var errBoom = errors.New("boom")
 
+// shortRoot returns a taskd root with a short name, under $TMPDIR like
+// t.TempDir() but without the test function's name in the path.
+//
+// t.TempDir() nests the full test name and a run counter under the temp
+// directory, and this package appends "/taskd.sock" to the root for the
+// socket. Several of this package's own test names are long enough that the
+// combination exceeds macOS's 104-byte sockaddr_un.sun_path limit, which
+// fails the bind with an unhelpful "invalid argument" unrelated to the
+// daemon's own correctness. A short, random suffix keeps every socket path
+// well under that limit while still honoring $TMPDIR.
+func shortRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "td")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // start runs a daemon on a temporary root and returns it with its socket
 // path. It stops the daemon when the test ends.
 func start(t *testing.T) (*Daemon, string) {
 	t.Helper()
-	root := t.TempDir()
+	root := shortRoot(t)
 	d, err := New(root, clock.System())
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -139,7 +159,7 @@ func TestDaemonSocketIsPrivate(t *testing.T) {
 }
 
 func TestNewMarksAnOrphanedRunningTaskLost(t *testing.T) {
-	root := t.TempDir()
+	root := shortRoot(t)
 	dir := filepath.Join(paths.TasksDir(root), "orphan")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -166,7 +186,7 @@ func TestNewMarksAnOrphanedRunningTaskLost(t *testing.T) {
 }
 
 func TestNewLeavesAFinishedRecordAlone(t *testing.T) {
-	root := t.TempDir()
+	root := shortRoot(t)
 	dir := filepath.Join(paths.TasksDir(root), "done")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
