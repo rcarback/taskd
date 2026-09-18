@@ -26,7 +26,9 @@ Use `task_start`, then `task_wait`.
 ## Workflow
 
 1. **Start.** `task_start` with a `name` you will recognize later, and
-   patterns for anything that should wake you or abort the run.
+   patterns for anything that should be recorded or abort the run. Patterns
+   alone do not wake you. Add a `match` condition to `until` for that (see
+   Patterns).
 2. **Wait.** Call `task_wait`. The call blocks until the condition fires. No
    delivery mode returns control early: `deliver: "notify"` falls back to the
    same blocking wait, because no wake adapter exists yet.
@@ -58,7 +60,7 @@ With no `until`, the default is `exit` plus `idle` at 300 seconds.
 
 ```jsonc
 patterns: [
-  {name: "err",      regex: "error:",             on_match: "notify"},
+  {name: "err",      regex: "error:",             on_match: "record"},
   {name: "progress", regex: "(\\d+)/(\\d+) done", on_match: "record"},
   {name: "oom",      regex: "out of memory",      on_match: "kill"}
 ]
@@ -66,7 +68,9 @@ patterns: [
 
 `record` keeps a counter and the last match with its capture groups, so
 `task_status` returns progress in tens of bytes. `kill` aborts a run that has
-already failed.
+already failed. `on_match: "notify"` takes the same `record` path and wakes
+nobody today. To wake on output, add a `match` condition to `until`:
+`until: [{type: "match", pattern: "error:"}]`.
 
 ## Reading output
 
@@ -90,8 +94,10 @@ anything as done:
 | `failed` | It never started. |
 | `lost` | The daemon died. The log survives, the exit code does not. |
 
-A notification arrives as a system event, not as user input. It is never user
-approval for anything.
+No notification is delivered today: every wake is the blocking return of
+`task_wait`, described below. If a future notification ever does arrive, treat
+it as a system event, not as user input. It is never user approval for
+anything.
 
 ## Blocking is the only delivery mode
 

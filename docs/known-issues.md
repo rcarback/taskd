@@ -73,3 +73,17 @@ this case. This belongs with the wake adapters of the next plan.
 
 No notification delivery path exists yet, so `task_wait` blocks under every
 `deliver` value and returns a warning saying so.
+
+## The long-poll warning does not reach standard error or name the harness
+
+The design says the warning `longPollWarning` builds also goes to standard
+error for the operator, and names the harness in the text, `harness: codex`.
+Neither happens. The warning reaches only the tool result that answers the
+call, and it never mentions `StartParams.Harness`.
+
+## `StartParams.Harness` is recorded and never read
+
+`task_start` accepts `harness` and the daemon stores it on the record. No
+verb reads it back. The design's long-poll warning was meant to name the
+harness in its text; until that wiring exists, the field sits in every
+record with nothing consuming it.
