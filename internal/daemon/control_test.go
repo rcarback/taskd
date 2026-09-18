@@ -5,7 +5,9 @@ package daemon
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/rcarback/taskd/internal/clock"
 	"github.com/rcarback/taskd/internal/supervisor"
 )
 
@@ -27,6 +29,48 @@ func TestSignalEndsATaskAndReportsKilled(t *testing.T) {
 	}
 	if e.Record().Exit != nil {
 		t.Fatal("Exit is set for a killed task, want nil")
+	}
+}
+
+// TestSignalEscalatesToKillAfterTheGrace covers insist, the grace-then-kill
+// path that is the only thing making task_signal end a task that ignores
+// SIGTERM. Replacing its Signal call with a no-op left the rest of the
+// package green.
+//
+// The daemon runs on a fake clock, so the grace is advanced rather than
+// waited out: BlockUntil(1) synchronises with insist registering its timer,
+// which is the only timer on this clock while the task is alive.
+//
+// The script execs sleep after setting the trap. An ignored disposition
+// survives exec, so the task is one process that ignores SIGTERM rather than
+// a shell with a sleep child: a grandchild holding the pseudo-terminal open
+// after the kill would leave reap's drain waiting on a fake clock nothing
+// advances again.
+func TestSignalEscalatesToKillAfterTheGrace(t *testing.T) {
+	clk := clock.NewFake(time.Unix(0, 0))
+	d, err := New(shortRoot(t), clk)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d.Register()
+
+	got, err := callVerb(t, d, "task_start", StartParams{
+		Command: "sh", Args: []string{"-c", `trap "" TERM; exec sleep 60`},
+	})
+	if err != nil {
+		t.Fatalf("task_start: %v", err)
+	}
+	e, _ := d.Reg.Get(got.(StartResult).ID)
+
+	if _, err := callVerb(t, d, "task_signal", SignalParams{ID: got.(StartResult).ID}); err != nil {
+		t.Fatalf("task_signal: %v", err)
+	}
+
+	clk.BlockUntil(1)
+	clk.Advance(time.Duration(defaultGraceSeconds) * time.Second)
+
+	if state := waitForState(t, e); state != supervisor.StateKilled {
+		t.Fatalf("State = %q, want killed: only the grace escalation can end a task that ignores SIGTERM", state)
 	}
 }
 
@@ -81,9 +125,19 @@ func TestWriteToANonPTYTaskFails(t *testing.T) {
 	}
 }
 
+// TestWriteSendsInputToARunningTask asserts on output only a task that read
+// its input could have produced.
+//
+// Asserting that the log contains the written bytes proves nothing: the
+// terminal line discipline echoes every byte written to the master straight
+// back to the read side, so that assertion holds even for a task that never
+// reads its input at all. The shell here has to read the line and interpolate
+// it, so "got=hello" can only come from the child.
 func TestWriteSendsInputToARunningTask(t *testing.T) {
 	d := newDaemon(t)
-	got, err := callVerb(t, d, "task_start", StartParams{Command: "cat"})
+	got, err := callVerb(t, d, "task_start", StartParams{
+		Command: "sh", Args: []string{"-c", "read l; echo got=$l"},
+	})
 	if err != nil {
 		t.Fatalf("task_start: %v", err)
 	}
@@ -91,9 +145,6 @@ func TestWriteSendsInputToARunningTask(t *testing.T) {
 
 	if _, err := callVerb(t, d, "task_write", WriteParams{ID: id, Data: "hello\n"}); err != nil {
 		t.Fatalf("task_write: %v", err)
-	}
-	if _, err := callVerb(t, d, "task_write", WriteParams{ID: id, Data: "\x04"}); err != nil {
-		t.Fatalf("task_write EOT: %v", err)
 	}
 
 	e, _ := d.Reg.Get(id)
@@ -103,7 +154,7 @@ func TestWriteSendsInputToARunningTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("task_read: %v", err)
 	}
-	if !strings.Contains(res.(ReadResult).Data, "hello") {
-		t.Fatalf("Data = %q, want the input echoed back", res.(ReadResult).Data)
+	if data := res.(ReadResult).Data; !strings.Contains(data, "got=hello") {
+		t.Fatalf("Data = %q, want got=hello: the task must have read the input, not just echoed it", data)
 	}
 }
