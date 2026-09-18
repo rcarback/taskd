@@ -16,7 +16,7 @@ func TestTapPassesRawBytesThrough(t *testing.T) {
 	// The log must hold exactly what the task produced, escape sequences
 	// and all. Only the matching view is stripped.
 	var sink bytes.Buffer
-	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)))
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
 
 	raw := []byte("\x1b[31merror:\x1b[0m boom\n")
 	n, err := tap.Write(raw)
@@ -33,7 +33,7 @@ func TestTapPassesRawBytesThrough(t *testing.T) {
 
 func TestTapCountsCompleteLinesOnly(t *testing.T) {
 	var sink bytes.Buffer
-	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)))
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
 
 	if _, err := tap.Write([]byte("one\ntwo\nthr")); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -53,7 +53,7 @@ func TestTapMatchesAcrossAChunkBoundary(t *testing.T) {
 	// A pattern that straddles two writes must still match. Splitting on
 	// arrival rather than on lines is the classic way to miss it.
 	var sink bytes.Buffer
-	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)))
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
 
 	events, cancel := tap.OnMatch("err", regexp.MustCompile(`error:`))
 	defer cancel()
@@ -89,7 +89,7 @@ func TestTapMatchesAcrossAChunkBoundary(t *testing.T) {
 func TestTapStripsEscapesBeforeMatching(t *testing.T) {
 	// A colour code sitting inside the word must not stop the match.
 	var sink bytes.Buffer
-	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)))
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
 
 	events, cancel := tap.OnMatch("err", regexp.MustCompile(`^error: boom$`))
 	defer cancel()
@@ -109,7 +109,7 @@ func TestTapStripsEscapesBeforeMatching(t *testing.T) {
 
 func TestTapMatchFiresOnce(t *testing.T) {
 	var sink bytes.Buffer
-	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)))
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
 
 	events, cancel := tap.OnMatch("err", regexp.MustCompile(`error`))
 	defer cancel()
@@ -132,7 +132,7 @@ func TestTapMatchFiresOnce(t *testing.T) {
 
 func TestTapOnLinesFiresAtTheThreshold(t *testing.T) {
 	var sink bytes.Buffer
-	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)))
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
 
 	events, cancel := tap.OnLines(3)
 	defer cancel()
@@ -166,7 +166,7 @@ func TestTapLastWriteTracksTheClock(t *testing.T) {
 	start := time.Unix(1_000, 0)
 	fake := clock.NewFake(start)
 	var sink bytes.Buffer
-	tap := watch.NewTap(&sink, fake)
+	tap := watch.NewTap(&sink, fake, nil)
 
 	if got := tap.LastWrite(); !got.Equal(start) {
 		t.Errorf("LastWrite() = %v before any write, want the start time %v", got, start)
@@ -187,7 +187,7 @@ func TestTapCarriesSplitEscapeSequenceAcrossWrites(t *testing.T) {
 	// unfinished bytes as pendingLen, and the tap must carry them into the
 	// next Write via t.pending rather than match them as literal text.
 	var sink bytes.Buffer
-	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)))
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
 
 	events, cancel := tap.OnMatch("err", regexp.MustCompile(`^error: boom$`))
 	defer cancel()
@@ -225,7 +225,7 @@ func TestTapCarriesSplitEscapeSequenceAcrossWrites(t *testing.T) {
 
 func TestTapCancelUnregisters(t *testing.T) {
 	var sink bytes.Buffer
-	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)))
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
 
 	events, cancel := tap.OnMatch("err", regexp.MustCompile(`error`))
 	cancel()

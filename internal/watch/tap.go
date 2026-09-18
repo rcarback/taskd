@@ -67,6 +67,10 @@ type Tap struct {
 
 	matchers []*matcher
 	counters []*counter
+
+	patterns []*CompiledPattern
+	killed   chan Event
+	killDone bool
 }
 
 type matcher struct {
@@ -82,9 +86,17 @@ type counter struct {
 	done   bool
 }
 
-// NewTap returns a Tap that writes through to sink.
-func NewTap(sink io.Writer, clk clock.Clock) *Tap {
-	return &Tap{sink: sink, clk: clk, lastWrite: clk.Now()}
+// NewTap returns a Tap that writes through to sink and evaluates pats
+// against every line it observes.
+//
+// A nil or empty pats is normal: most tasks run without start-time
+// patterns, and Stats then reports an empty slice.
+func NewTap(sink io.Writer, clk clock.Clock, pats []*CompiledPattern) *Tap {
+	return &Tap{
+		sink: sink, clk: clk, lastWrite: clk.Now(),
+		patterns: pats,
+		killed:   make(chan Event, 1),
+	}
 }
 
 // Write sends p to the sink unchanged, then observes it.
@@ -134,6 +146,7 @@ func (t *Tap) observe(p []byte) {
 		line := string(t.partial[:i])
 		t.partial = t.partial[i+1:]
 		t.lines++
+		t.applyPatterns(line)
 		t.matchLine(line)
 		t.countLine()
 	}
@@ -191,6 +204,31 @@ func (t *Tap) countLine() {
 		}
 	}
 	t.counters = live
+}
+
+// applyPatterns records every start-time pattern that line matches, and
+// reports the first kill. The caller holds mu.
+func (t *Tap) applyPatterns(line string) {
+	for _, p := range t.patterns {
+		groups := p.re.FindStringSubmatch(line)
+		if groups == nil {
+			continue
+		}
+		p.count++
+		p.last = line
+		p.groups = append([]string{}, groups[1:]...)
+		p.lastAt = t.lastWrite
+		p.matched = true
+
+		// A kill pattern counts like any other, so status still explains
+		// what ended the task, but it reports only its first hit: the
+		// channel holds one event and the task is ending regardless.
+		if p.Action == ActionKill && !t.killDone {
+			t.killDone = true
+			t.killed <- Event{Kind: KindMatch, Name: p.Name, Line: line, Groups: p.groups}
+			close(t.killed)
+		}
+	}
 }
 
 // OnMatch registers a waiter for the first line matching re.
@@ -268,6 +306,30 @@ func (t *Tap) dropCounter(c *counter) {
 			return
 		}
 	}
+}
+
+// Killed reports the first kill pattern to match. The channel closes after
+// that event, or when the task ends without one having matched.
+func (t *Tap) Killed() <-chan Event { return t.killed }
+
+// Stats reports every pattern's counter and last hit.
+//
+// The result is never nil, and neither is any Groups field: a nil slice
+// marshals to JSON null, which a client iterating it would have to test for.
+func (t *Tap) Stats() []PatternState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	out := make([]PatternState, 0, len(t.patterns))
+	for _, p := range t.patterns {
+		s := PatternState{Name: p.Name, Count: p.count, Groups: append([]string{}, p.groups...)}
+		if p.matched {
+			s.LastLine = p.last
+			s.LastAt = p.lastAt
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // Lines reports how many complete lines the task has written.

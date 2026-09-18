@@ -17,7 +17,7 @@ import (
 // covered from outside the package in tap_test.go.
 
 func TestTapDropsAFiredMatcher(t *testing.T) {
-	tap := NewTap(discard{}, clock.NewFake(time.Unix(0, 0)))
+	tap := NewTap(discard{}, clock.NewFake(time.Unix(0, 0)), nil)
 
 	events, cancel := tap.OnMatch("err", regexp.MustCompile(`error`))
 	defer cancel()
@@ -45,7 +45,7 @@ func TestTapDropsAFiredMatcher(t *testing.T) {
 }
 
 func TestTapDropsAFiredCounter(t *testing.T) {
-	tap := NewTap(discard{}, clock.NewFake(time.Unix(0, 0)))
+	tap := NewTap(discard{}, clock.NewFake(time.Unix(0, 0)), nil)
 
 	events, cancel := tap.OnLines(1)
 	defer cancel()
@@ -77,7 +77,7 @@ func TestTapDropsAFiredCounter(t *testing.T) {
 // not accumulate a matchers entry per call it already served, only for the
 // ones still pending.
 func TestTapMatchersStayBoundedAcrossManyWaiters(t *testing.T) {
-	tap := NewTap(discard{}, clock.NewFake(time.Unix(0, 0)))
+	tap := NewTap(discard{}, clock.NewFake(time.Unix(0, 0)), nil)
 
 	// Register and immediately satisfy ten matchers, one per line.
 	for i := range 10 {
