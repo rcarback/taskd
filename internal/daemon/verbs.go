@@ -5,6 +5,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -242,6 +243,11 @@ func (d *Daemon) read(p ReadParams) (ReadResult, error) {
 		}
 		clean, _ := ansi.Strip(raw)
 		written, retained := store.Counts()
+		// Next always jumps to the end of the stream, even for a task still
+		// running: a tail read is a snapshot of the last N lines, not a
+		// cursor into the middle of one, so there is no meaningful earlier
+		// offset to resume from. A caller who follows a tail read with a
+		// since read gets nothing between the tail window and this call.
 		return ReadResult{
 			Data: string(clean), Next: written,
 			TruncatedBytes: written - retained, EOF: !e.Live(),
@@ -311,12 +317,22 @@ func (d *Daemon) search(p SearchParams) (SearchResult, error) {
 	// rotation discarded, so starting at 0 reads the whole retained log
 	// without reading Written and Retained as two separate, racing counters.
 	_, retained := store.Counts()
-	raw, _, truncated, err := store.ReadSince(0, int(retained)+1)
+	// retained is an int64 bounded only by the task's max_output. Converting
+	// it straight to int would wrap negative on a 32-bit build once
+	// max_output passes 2 GiB, so clamp to the platform's int range first.
+	limit := retained + 1
+	if limit <= 0 || limit > math.MaxInt {
+		limit = math.MaxInt
+	}
+	raw, _, truncated, err := store.ReadSince(0, int(limit))
 	if err != nil {
 		return SearchResult{}, err
 	}
 	clean, _ := ansi.Strip(raw)
-	lines := strings.Split(strings.TrimSuffix(string(clean), "\n"), "\n")
+	var lines []string
+	if len(clean) > 0 {
+		lines = strings.Split(strings.TrimSuffix(string(clean), "\n"), "\n")
+	}
 
 	maxMatches := p.MaxMatches
 	if maxMatches <= 0 {
@@ -346,6 +362,11 @@ func (d *Daemon) search(p SearchParams) (SearchResult, error) {
 }
 
 // window returns lines[lo:hi], clamped to the slice.
+//
+// The result is a non-nil, possibly-empty slice: Match.Before and
+// Match.After carry no omitempty tag, so a caller iterating "before" or
+// "after" gets [] rather than a missing key when the window is empty, which
+// at the default context of 0 is every match.
 func window(lines []string, lo, hi int) []string {
 	if lo < 0 {
 		lo = 0
@@ -354,9 +375,9 @@ func window(lines []string, lo, hi int) []string {
 		hi = len(lines)
 	}
 	if lo >= hi {
-		return nil
+		return []string{}
 	}
-	return append([]string(nil), lines[lo:hi]...)
+	return append([]string{}, lines[lo:hi]...)
 }
 
 // storeWriter adapts an output.Store to io.Writer.

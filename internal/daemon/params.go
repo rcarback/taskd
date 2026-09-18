@@ -65,6 +65,11 @@ type StatusResult struct {
 }
 
 // ReadParams is task_read's input. Since and Tail are mutually exclusive.
+//
+// A Tail read always reports Next as the end of the stream, even for a task
+// still running: it is a snapshot of the last N lines, not a cursor
+// resumable from the middle of one. A caller that follows a Tail read with a
+// Since read receives nothing between the tail window and that call.
 type ReadParams struct {
 	ID       string `json:"id"`
 	Since    *int64 `json:"since,omitempty"`
@@ -89,11 +94,24 @@ type SearchParams struct {
 }
 
 // Match is one search hit with its surrounding lines.
+//
+// LineNumber counts from the first line still retained in the log, not from
+// the first line the task ever printed: rotation can discard leading lines
+// before a search ever runs, and nothing renumbers around the gap. Its JSON
+// tag says so, because the wire name is what a client reads — a Go doc
+// comment is invisible to it. A non-zero TruncatedBytes on the containing
+// SearchResult means earlier lines are gone and this count does not include
+// them; there is no way to recover their true line numbers, since the
+// discarded newlines are gone with the bytes.
+//
+// Before and After carry no omitempty tag: a caller iterating "before" or
+// "after" gets [] rather than a missing key when the window is empty, which
+// at the default Context of 0 is every match.
 type Match struct {
-	LineNumber int      `json:"line_number"`
+	LineNumber int      `json:"retained_line_number"`
 	Line       string   `json:"line"`
-	Before     []string `json:"before,omitempty"`
-	After      []string `json:"after,omitempty"`
+	Before     []string `json:"before"`
+	After      []string `json:"after"`
 }
 
 // SearchResult is task_search's output. More reports that MaxMatches hid

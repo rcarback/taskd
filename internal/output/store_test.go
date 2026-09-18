@@ -279,10 +279,13 @@ func TestOpenExistingReadsARotatedLogAtItsRealOffsets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	var model []byte
+	line := []byte("0123456789abcdef\n")
 	for range 20 {
-		if err := s.Append([]byte("0123456789abcdef\n")); err != nil {
+		if err := s.Append(line); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
+		model = append(model, line...)
 	}
 	written, retained := s.Counts()
 	if err := s.Close(); err != nil {
@@ -301,6 +304,13 @@ func TestOpenExistingReadsARotatedLogAtItsRealOffsets(t *testing.T) {
 	}
 	if int64(len(data)) != retained {
 		t.Fatalf("len(data) = %d, want %d (the whole retained tail)", len(data), retained)
+	}
+	// The content itself, not just its length: this is what would catch a
+	// base restored one line off from the real rotation point, which a
+	// length-only check cannot.
+	want := model[int64(len(model))-retained:]
+	if !bytes.Equal(data, want) {
+		t.Fatalf("data = %q, want %q (the last %d bytes of everything appended)", data, want, retained)
 	}
 	if truncated != 0 {
 		t.Fatalf("truncated = %d, want 0 reading from the first retained byte", truncated)

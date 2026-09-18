@@ -64,6 +64,13 @@ func OpenExisting(path string, written, retained int64) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("output: open %s: %w", path, err)
 	}
+	// maxBytes is not a cap here: the readOnly guard in Append means rotate
+	// can never run against this Store, so the field is otherwise unused.
+	// retained+1 exists only to keep maxBytes positive when retained is 0 (a
+	// task with no output), satisfying the precondition Open enforces on
+	// every other Store. Do not read this field expecting the task's real
+	// max_output — record.Record does not persist that value, so a reopened
+	// log has no way to recover it.
 	return &Store{
 		path: path, file: f, maxBytes: retained + 1,
 		written: written, base: written - retained, readOnly: true,
