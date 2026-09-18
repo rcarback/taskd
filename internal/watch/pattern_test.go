@@ -167,3 +167,46 @@ func TestKillPatternStillRecordsItsCount(t *testing.T) {
 		t.Errorf("Count = %d, want 1", got)
 	}
 }
+
+func TestTwoKillPatternsOnOneLineReportOnlyOne(t *testing.T) {
+	// applyPatterns evaluates every pattern against a line in one pass. If
+	// two kill patterns both match that same line, a naive implementation
+	// would send twice on killed: the second send would hit a channel
+	// already closed by the first and panic, which would take down the
+	// daemon on the output path of every supervised process.
+	var sink bytes.Buffer
+	pats := compile(t,
+		watch.Pattern{Name: "oom", Regex: "out of memory", OnMatch: watch.ActionKill},
+		watch.Pattern{Name: "exhausted", Regex: "exhausted", OnMatch: watch.ActionKill},
+	)
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), pats)
+
+	if _, err := tap.Write([]byte("out of memory exhausted\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	select {
+	case <-tap.Killed():
+	default:
+		t.Fatal("no kill event: two kill patterns matched and nothing reported it")
+	}
+
+	select {
+	case e, ok := <-tap.Killed():
+		if ok {
+			t.Fatalf("second kill event %+v: two patterns matching one line must report only one", e)
+		}
+	default:
+		t.Fatal("the kill channel is still open: a second matching pattern would block the observer")
+	}
+
+	stats := tap.Stats()
+	if len(stats) != 2 {
+		t.Fatalf("Stats() returned %d entries, want 2", len(stats))
+	}
+	for _, s := range stats {
+		if s.Count != 1 {
+			t.Errorf("pattern %q Count = %d, want 1: a kill pattern counts like any other", s.Name, s.Count)
+		}
+	}
+}

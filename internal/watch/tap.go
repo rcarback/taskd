@@ -308,8 +308,13 @@ func (t *Tap) dropCounter(c *counter) {
 	}
 }
 
-// Killed reports the first kill pattern to match. The channel closes after
-// that event, or when the task ends without one having matched.
+// Killed reports the first kill pattern to match. The channel closes right
+// after that one event.
+//
+// A Tap has no notion of the task ending, so nothing closes this channel if
+// no kill pattern ever matches: a caller must select on it alongside the
+// task's own completion signal, not range over it or block on a receive from
+// it alone, or a task with no kill pattern would hang the caller forever.
 func (t *Tap) Killed() <-chan Event { return t.killed }
 
 // Stats reports every pattern's counter and last hit.
