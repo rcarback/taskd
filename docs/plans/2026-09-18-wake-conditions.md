@@ -1215,6 +1215,8 @@ func (t *Tap) Stats() []PatternState {
 
 Call `t.applyPatterns(line)` in the per-line loop inside `observe`, immediately before `t.matchLine(line)`, so a `notify` pattern and a wait-time `match` condition see the same line in the same pass.
 
+`NewTap` gains its third parameter here, which breaks every call site Task 2 wrote. Update `internal/watch/tap_test.go`: each existing `watch.NewTap(&sink, clk)` becomes `watch.NewTap(&sink, clk, nil)`. A nil pattern set is the normal case for those tests, and they must keep passing unchanged otherwise — they cover the passthrough, line splitting, and chunk-boundary behaviour this task must not disturb.
+
 - [ ] **Step 5: Run the tests**
 
 Run: `cd /Users/carback1/Code/taskd && go test ./internal/watch/ -race -v`
@@ -1665,7 +1667,7 @@ import (
 )
 
 func TestStartRejectsABadPattern(t *testing.T) {
-	d := newTestDaemon(t)
+	d := newDaemon(t)
 	_, err := callVerb(t, d, "task_start", StartParams{
 		Command:  "true",
 		Patterns: []watch.Pattern{{Name: "err", Regex: "([", OnMatch: watch.ActionRecord}},
@@ -1679,7 +1681,7 @@ func TestStartRejectsABadPattern(t *testing.T) {
 }
 
 func TestStatusReportsPatternCounters(t *testing.T) {
-	d := newTestDaemon(t)
+	d := newDaemon(t)
 	res, err := callVerb(t, d, "task_start", StartParams{
 		Command: "sh", Args: []string{"-c", "echo 1/3 done; echo 2/3 done; echo 3/3 done"},
 		Patterns: []watch.Pattern{
@@ -1691,7 +1693,7 @@ func TestStatusReportsPatternCounters(t *testing.T) {
 	}
 	id := res.(StartResult).ID
 
-	e := entryFor(t, d, id)
+	e, _ := d.Reg.Get(id)
 	if state := waitForState(t, e); state != supervisor.StateExited {
 		t.Fatalf("State = %q, want exited", state)
 	}
@@ -1719,7 +1721,7 @@ func TestStatusReportsPatternCounters(t *testing.T) {
 func TestPatternsFieldIsNeverNilOnTheWire(t *testing.T) {
 	// A nil slice marshals to JSON null. A client iterating patterns would
 	// have to test for that first.
-	d := newTestDaemon(t)
+	d := newDaemon(t)
 	res, err := callVerb(t, d, "task_start", StartParams{Command: "true"})
 	if err != nil {
 		t.Fatalf("task_start: %v", err)
@@ -1736,7 +1738,7 @@ func TestPatternsFieldIsNeverNilOnTheWire(t *testing.T) {
 }
 
 func TestKillPatternEndsTheTask(t *testing.T) {
-	d := newTestDaemon(t)
+	d := newDaemon(t)
 	res, err := callVerb(t, d, "task_start", StartParams{
 		Command: "sh", Args: []string{"-c", "echo out of memory; sleep 60"},
 		Patterns: []watch.Pattern{
@@ -1748,7 +1750,7 @@ func TestKillPatternEndsTheTask(t *testing.T) {
 	}
 	id := res.(StartResult).ID
 
-	e := entryFor(t, d, id)
+	e, _ := d.Reg.Get(id)
 	if state := waitForState(t, e); state != supervisor.StateKilled {
 		t.Fatalf("State = %q, want killed: the oom pattern asked for it", state)
 	}
@@ -1757,7 +1759,7 @@ func TestKillPatternEndsTheTask(t *testing.T) {
 func TestOutputStillReachesTheLogThroughTheTap(t *testing.T) {
 	// The tap sits between the process and the store. A regression here
 	// would silently empty every task's log.
-	d := newTestDaemon(t)
+	d := newDaemon(t)
 	res, err := callVerb(t, d, "task_start", StartParams{
 		Command: "sh", Args: []string{"-c", "echo hello"},
 	})
@@ -1766,12 +1768,13 @@ func TestOutputStillReachesTheLogThroughTheTap(t *testing.T) {
 	}
 	id := res.(StartResult).ID
 
-	e := entryFor(t, d, id)
+	e, _ := d.Reg.Get(id)
 	if state := waitForState(t, e); state != supervisor.StateExited {
 		t.Fatalf("State = %q, want exited", state)
 	}
 
-	got, err := callVerb(t, d, "task_read", ReadParams{ID: id, Tail: intPtr(1)})
+	one := 1
+	got, err := callVerb(t, d, "task_read", ReadParams{ID: id, Tail: &one})
 	if err != nil {
 		t.Fatalf("task_read: %v", err)
 	}
@@ -1781,7 +1784,7 @@ func TestOutputStillReachesTheLogThroughTheTap(t *testing.T) {
 }
 ```
 
-Reuse the existing helpers in this package: `newTestDaemon`, `callVerb`, `entryFor`, `waitForState`, and `intPtr`. Read `internal/daemon/verbs_test.go` and `internal/daemon/read_test.go` for their signatures before writing the test. If `entryFor` or `intPtr` does not exist under that name, use whatever the package already provides rather than adding a duplicate.
+Reuse the existing helpers in this package, defined in `internal/daemon/verbs_test.go`: `newDaemon(t)` builds a registered daemon on a short temporary root, `callVerb(t, d, verb, v)` runs one handler, and `waitForState(t, e)` blocks until an entry reaches a terminal state. The package has no `entryFor` helper — tests call `d.Reg.Get(id)` directly, which returns `(*Entry, bool)`. It has no pointer helper either: for a `*int` field such as `ReadParams.Tail`, declare a local (`one := 1`) and take its address, matching `internal/daemon/read_test.go`.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -1943,7 +1946,7 @@ import (
 )
 
 func TestWaitReturnsWhenTheTaskExits(t *testing.T) {
-	d := newTestDaemon(t)
+	d := newDaemon(t)
 	res, err := callVerb(t, d, "task_start", StartParams{Command: "true"})
 	if err != nil {
 		t.Fatalf("task_start: %v", err)
@@ -1976,7 +1979,7 @@ func TestWaitAlwaysCarriesTheLongPollWarning(t *testing.T) {
 	// The warning is the product. A blocked agent is the problem this tool
 	// exists to remove, so every blocking wait says so where the model
 	// reads it.
-	d := newTestDaemon(t)
+	d := newDaemon(t)
 	res, err := callVerb(t, d, "task_start", StartParams{Command: "true"})
 	if err != nil {
 		t.Fatalf("task_start: %v", err)
@@ -1994,7 +1997,7 @@ func TestWaitAlwaysCarriesTheLongPollWarning(t *testing.T) {
 
 func TestWaitNotifyDegradesRatherThanFails(t *testing.T) {
 	// A failure would teach the agent to stop asking for notification.
-	d := newTestDaemon(t)
+	d := newDaemon(t)
 	res, err := callVerb(t, d, "task_start", StartParams{Command: "true"})
 	if err != nil {
 		t.Fatalf("task_start: %v", err)
@@ -2015,7 +2018,7 @@ func TestWaitNotifyDegradesRatherThanFails(t *testing.T) {
 }
 
 func TestWaitDefaultsToExitAndIdle(t *testing.T) {
-	d := newTestDaemon(t)
+	d := newDaemon(t)
 	res, err := callVerb(t, d, "task_start", StartParams{Command: "true"})
 	if err != nil {
 		t.Fatalf("task_start: %v", err)
@@ -2032,7 +2035,7 @@ func TestWaitDefaultsToExitAndIdle(t *testing.T) {
 }
 
 func TestWaitRejectsAnUnknownID(t *testing.T) {
-	d := newTestDaemon(t)
+	d := newDaemon(t)
 	_, err := callVerb(t, d, "task_wait", WaitParams{IDs: []string{"nosuchtask"}})
 	if err == nil {
 		t.Fatal("task_wait accepted an unknown id")
@@ -2043,7 +2046,7 @@ func TestWaitRejectsAnUnknownID(t *testing.T) {
 }
 
 func TestWaitRejectsNoIDs(t *testing.T) {
-	d := newTestDaemon(t)
+	d := newDaemon(t)
 	_, err := callVerb(t, d, "task_wait", WaitParams{})
 	if err == nil {
 		t.Fatal("task_wait with no ids returned nil, want an error")
@@ -2129,6 +2132,8 @@ type Handler func(ctx context.Context, params json.RawMessage) (any, error)
 
 Update `jsonHandler` and every existing handler registration to match. The existing handlers ignore the context: give them an `_ context.Context` parameter rather than a second adapter, so there is one handler shape rather than two.
 
+This change reaches the tests. `callVerb` in `internal/daemon/verbs_test.go` invokes the handler directly as `h(b)`, so it must become `h(t.Context(), b)`. That single helper covers every verb test in the package, so no individual test changes.
+
 In `daemon.go`, the connection loop already closes every open connection when `Serve`'s context ends. Its doc comment says so, and names a handler that holds a connection open as a future long poll will. Derive a per-connection context there and pass it to `dispatch`.
 
 - [ ] **Step 6: Implement the handler**
@@ -2207,7 +2212,7 @@ func longPollWarning(deliver string, blockedS int) string {
 }
 ```
 
-If `Registry` has no `Get(id)` method, add one beside `Add` and `List`, honouring the lock order the registry's doc comment states: `Registry.mu` is always taken before `Entry.mu`, never the other way round.
+`Registry.Get(key string) (*Entry, bool)` already exists at `internal/daemon/registry.go:290`, beside `Add` and `List`. Use it as is. Do not reach for `Entry.mu` from inside a registry lock: the registry's doc comment states the order, `Registry.mu` before `Entry.mu`, never the reverse.
 
 - [ ] **Step 7: Run the tests**
 
