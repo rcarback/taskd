@@ -23,7 +23,7 @@ func TestServerRegistersItsTools(t *testing.T) {
 	}
 
 	for _, name := range []string{
-		"task_status", "task_read", "task_search", "task_signal", "task_write",
+		"task_status", "task_start", "task_read", "task_search", "task_signal", "task_write",
 	} {
 		if !got[name] {
 			t.Errorf("tool %q is not registered; got %v", name, got)

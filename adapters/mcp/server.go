@@ -64,6 +64,7 @@ func New(root string, h Harness) *mcp.Server {
 	srv := mcp.NewServer(
 		&mcp.Implementation{Name: "taskd", Version: version.String()}, nil)
 	s.addStatus(srv)
+	s.addStart(srv)
 	s.addRead(srv)
 	s.addSearch(srv)
 	s.addSignal(srv)
