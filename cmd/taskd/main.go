@@ -62,6 +62,7 @@ func serve(args []string, stdout io.Writer) int {
 		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
 		return 1
 	}
+	d.Register()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

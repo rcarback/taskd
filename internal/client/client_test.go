@@ -122,12 +122,12 @@ func TestCallStartsADaemonWhenNoneIsListening(t *testing.T) {
 	// leak that daemon.
 	t.Cleanup(func() { stopDaemon(t, root) })
 
-	// The daemon this starts registers no verb handlers of its own — Tasks 6
-	// to 8 add them — so task_status necessarily comes back as an unknown
-	// verb. That the daemon answered at all, rather than the call erroring
-	// out, is what this test is checking: the socket exists and a real
-	// daemon is listening on it.
-	res, err := Call(root, proto.Request{Verb: proto.VerbStatus})
+	// A verb no task registers, now or later, so the response always comes
+	// back as an unknown verb regardless of how many real verbs the daemon
+	// has picked up. That the daemon answered at all, rather than the call
+	// erroring out, is what this test is checking: the socket exists and a
+	// real daemon is listening on it.
+	res, err := Call(root, proto.Request{Verb: "task_nonsense"})
 	if err != nil {
 		t.Fatalf("Call on a cold root: %v", err)
 	}

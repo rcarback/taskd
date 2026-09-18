@@ -94,6 +94,33 @@ func TestWrittenCountsEveryByteAcrossRotation(t *testing.T) {
 	}
 }
 
+func TestCountsMatchesWrittenBeforeRotationAndDivergesAfter(t *testing.T) {
+	s := open(t, 64)
+	line := []byte("0123456789abcdef\n") // 17 bytes
+
+	if err := s.Append(line); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	written, retained := s.Counts()
+	if written != int64(len(line)) || retained != written {
+		t.Fatalf("Counts() = (%d, %d), want (%d, %d) before any rotation", written, retained, len(line), len(line))
+	}
+
+	for range 19 {
+		if err := s.Append(line); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	written, retained = s.Counts()
+	if want := int64(len(line) * 20); written != want {
+		t.Fatalf("Written = %d, want %d: every byte the task produced", written, want)
+	}
+	if retained >= written {
+		t.Fatalf("Retained = %d, want less than Written = %d after rotation discarded output", retained, written)
+	}
+}
+
 func TestAppendAdvancesWrittenByAPartialWriteEvenOnError(t *testing.T) {
 	tmp, err := os.CreateTemp(t.TempDir(), "out.log")
 	if err != nil {

@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"reflect"
 	"syscall"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 
 func TestRegistryFindsATaskByIDAndByName(t *testing.T) {
 	r := NewRegistry()
-	e := &Entry{rec: record.Record{ID: "abc", Name: "build", State: supervisor.StateRunning}}
+	e := NewEntry(record.Record{ID: "abc", Name: "build", State: supervisor.StateRunning}, "")
 	if err := r.Add(e); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -31,10 +32,10 @@ func TestRegistryFindsATaskByIDAndByName(t *testing.T) {
 
 func TestRegistryRejectsADuplicateLiveName(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Add(&Entry{rec: record.Record{ID: "a", Name: "build", State: supervisor.StateRunning}}); err != nil {
+	if err := r.Add(NewEntry(record.Record{ID: "a", Name: "build", State: supervisor.StateRunning}, "")); err != nil {
 		t.Fatalf("first Add: %v", err)
 	}
-	err := r.Add(&Entry{rec: record.Record{ID: "b", Name: "build", State: supervisor.StateRunning}})
+	err := r.Add(NewEntry(record.Record{ID: "b", Name: "build", State: supervisor.StateRunning}, ""))
 	if err == nil {
 		t.Fatal("Add accepted a duplicate name while the first task is running")
 	}
@@ -42,14 +43,14 @@ func TestRegistryRejectsADuplicateLiveName(t *testing.T) {
 
 func TestRegistryFreesANameWhenTheTaskEnds(t *testing.T) {
 	r := NewRegistry()
-	first := &Entry{rec: record.Record{ID: "a", Name: "build", State: supervisor.StateRunning}}
+	first := NewEntry(record.Record{ID: "a", Name: "build", State: supervisor.StateRunning}, "")
 	if err := r.Add(first); err != nil {
 		t.Fatalf("first Add: %v", err)
 	}
 
 	first.SetState(supervisor.StateExited)
 
-	if err := r.Add(&Entry{rec: record.Record{ID: "b", Name: "build", State: supervisor.StateRunning}}); err != nil {
+	if err := r.Add(NewEntry(record.Record{ID: "b", Name: "build", State: supervisor.StateRunning}, "")); err != nil {
 		t.Fatalf("Add after the first task ended: %v", err)
 	}
 	got, ok := r.Get("build")
@@ -64,7 +65,7 @@ func TestRegistryFreesANameWhenTheTaskEnds(t *testing.T) {
 func TestRegistryAnAnonymousTaskNeedsNoName(t *testing.T) {
 	r := NewRegistry()
 	for _, id := range []string{"a", "b"} {
-		if err := r.Add(&Entry{rec: record.Record{ID: id, State: supervisor.StateRunning}}); err != nil {
+		if err := r.Add(NewEntry(record.Record{ID: id, State: supervisor.StateRunning}, "")); err != nil {
 			t.Fatalf("Add %s: %v", id, err)
 		}
 	}
@@ -83,11 +84,11 @@ func TestEntryFinishRecordsTerminalStateAndClearsLiveHandles(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			e := &Entry{rec: record.Record{ID: "a", State: supervisor.StateRunning}}
-			e.task = &supervisor.Task{}
-			e.store = &output.Store{}
+			e := NewEntry(record.Record{ID: "a", State: supervisor.StateRunning}, "")
+			e.AttachTask(&supervisor.Task{})
+			e.AttachStore(&output.Store{})
 
-			e.Finish(tc.res)
+			rec := e.Finish(tc.res, 11, 5)
 
 			if e.LiveTask() != nil {
 				t.Fatal("LiveTask() is non-nil after Finish")
@@ -95,13 +96,23 @@ func TestEntryFinishRecordsTerminalStateAndClearsLiveHandles(t *testing.T) {
 			if e.LiveStore() != nil {
 				t.Fatal("LiveStore() is non-nil after Finish")
 			}
+			select {
+			case <-e.Done():
+			default:
+				t.Fatal("Done() has not closed after Finish")
+			}
 
-			rec := e.Record()
 			if rec.State != tc.res.State {
 				t.Fatalf("State = %q, want %q", rec.State, tc.res.State)
 			}
+			if got := e.Record(); !reflect.DeepEqual(got, rec) {
+				t.Fatalf("Record() = %+v, want the record Finish returned %+v", got, rec)
+			}
 			if rec.EndedAt == nil || !rec.EndedAt.Equal(tc.res.Ended) {
 				t.Fatalf("EndedAt = %v, want %v", rec.EndedAt, tc.res.Ended)
+			}
+			if rec.Written != 11 || rec.Retained != 5 {
+				t.Fatalf("Written, Retained = %d, %d, want 11, 5", rec.Written, rec.Retained)
 			}
 			switch tc.res.State {
 			case supervisor.StateExited:
@@ -120,5 +131,22 @@ func TestEntryFinishRecordsTerminalStateAndClearsLiveHandles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEntryFinishRemapsAKillRequestedSignalToKilled(t *testing.T) {
+	e := NewEntry(record.Record{ID: "a", State: supervisor.StateRunning}, "")
+	e.RequestKill()
+
+	rec := e.Finish(supervisor.Result{State: supervisor.StateSignaled, Signal: syscall.SIGKILL}, 0, 0)
+
+	if rec.State != supervisor.StateKilled {
+		t.Fatalf("State = %q, want killed: taskd asked for this kill", rec.State)
+	}
+	if rec.Signal != syscall.SIGKILL.String() {
+		t.Fatalf("Signal = %q, want %q: the process really did die on a signal", rec.Signal, syscall.SIGKILL.String())
+	}
+	if rec.Exit != nil {
+		t.Fatalf("Exit = %v, want nil for a killed task", rec.Exit)
 	}
 }

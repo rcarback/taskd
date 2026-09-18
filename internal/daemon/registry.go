@@ -18,19 +18,35 @@ import (
 // read LiveTask or LiveStore concurrently with a reaper clearing them at
 // Finish, and that is a real data race, not just a stale read, if either
 // side touches the field without the lock. Record, SetState, Live,
-// LiveTask, LiveStore, Dir, and Finish are the entire surface for touching
-// an Entry from outside this file.
+// LiveTask, LiveStore, Dir, Done, AttachStore, AttachTask, RequestKill, and
+// Finish are the entire surface for touching an Entry from outside this
+// file.
 //
 // LiveTask and LiveStore are nil for a task that has ended: the daemon
 // keeps the record so status and reads still answer, and drops the live
 // process and its open log file.
+//
+// done closes when the task reaches a terminal state. Callers use Done.
+// killRequested records that taskd asked for the kill, so the waiter can
+// report killed rather than signaled.
 type Entry struct {
 	mu    sync.Mutex
 	rec   record.Record
 	task  *supervisor.Task
 	store *output.Store
 	dir   string
+
+	done          chan struct{}
+	killRequested bool
 }
+
+// NewEntry returns an entry whose Done channel is ready to use.
+func NewEntry(rec record.Record, dir string) *Entry {
+	return &Entry{rec: rec, dir: dir, done: make(chan struct{})}
+}
+
+// Done closes once the task has reached a terminal state.
+func (e *Entry) Done() <-chan struct{} { return e.done }
 
 // Record returns a copy of the entry's record.
 func (e *Entry) Record() record.Record {
@@ -76,15 +92,55 @@ func (e *Entry) Dir() string {
 	return e.dir
 }
 
-// Finish records that the task has ended, filling in the record's terminal
-// fields from res, and clears the entry's live task and store together with
-// them. Taking the lock once for all of it means no caller can observe a
-// state where, for example, the record already reads exited but LiveTask
-// has not been cleared yet.
+// AttachStore and AttachTask record the live handles. They are separate
+// because the store exists before the process does: the entry joins the
+// registry with its store so a status read can find it, and the task is
+// set only once supervisor.Start has succeeded. Both take the same lock
+// Finish uses to clear the handles.
+func (e *Entry) AttachStore(store *output.Store) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.store = store
+}
+
+// AttachTask records the entry's live process. See AttachStore.
+func (e *Entry) AttachTask(task *supervisor.Task) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.task = task
+}
+
+// handles returns the task and its store together under one lock, for the
+// single goroutine that waits on the task and then closes its store.
+//
+// Reading the fields one at a time through LiveTask and LiveStore would let
+// Finish run between the two reads and hand back a mismatched pair.
+func (e *Entry) handles() (*supervisor.Task, *output.Store) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.task, e.store
+}
+
+// RequestKill records that taskd asked for this task to end, so its
+// terminal state is killed rather than signaled.
+func (e *Entry) RequestKill() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.killRequested = true
+}
+
+// Finish records the terminal result and closes Done exactly once. It
+// clears the entry's live task and store together with the record update.
+// Taking the lock once for all of it means no caller can observe a state
+// where, for example, the record already reads exited but LiveTask has not
+// been cleared yet.
+//
+// written and retained are the byte counts the caller reads from the store
+// before this call clears the handle. Finish returns the record to persist.
 //
 // The caller reads State before ExitCode or Signal, so Finish only fills in
 // whichever one res.State makes meaningful.
-func (e *Entry) Finish(res supervisor.Result) {
+func (e *Entry) Finish(res supervisor.Result, written, retained int64) record.Record {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -95,6 +151,12 @@ func (e *Entry) Finish(res supervisor.Result) {
 		e.rec.Exit = &code
 	case supervisor.StateSignaled:
 		e.rec.Signal = res.Signal.String()
+		if e.killRequested {
+			// The spec reserves killed for a cap taskd applied or a client
+			// signal. The process really did die on a signal; what makes
+			// this killed rather than signaled is that taskd asked.
+			e.rec.State = supervisor.StateKilled
+		}
 	case supervisor.StateRunning, supervisor.StateKilled, supervisor.StateFailed, supervisor.StateLost:
 		// Neither field applies: StateRunning is not terminal, and the
 		// other three carry no exit code or signal of their own.
@@ -105,9 +167,16 @@ func (e *Entry) Finish(res supervisor.Result) {
 		e.rec.OutputErr = res.OutputErr.Error()
 	}
 	e.rec.MaxRSSBytes = res.MaxRSSBytes
+	e.rec.Written = written
+	e.rec.Retained = retained
 
+	// Clear both live handles under this lock, and signal Done, so a
+	// connection goroutine reading through LiveTask or LiveStore can never
+	// observe a state this function is still in the middle of updating.
 	e.task = nil
 	e.store = nil
+	close(e.done)
+	return e.rec
 }
 
 // Registry holds every task the daemon knows, live or finished.

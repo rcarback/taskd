@@ -107,6 +107,15 @@ func (s *Store) Written() int64 {
 	return s.written
 }
 
+// Counts reports the total bytes the task ever produced and the bytes still
+// held on disk. They are read together under one lock, so a caller can
+// subtract them and never see two different moments.
+func (s *Store) Counts() (written, retained int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.written, s.written - s.base
+}
+
 // ReadSince returns up to limit bytes starting at cursor. next is the cursor
 // for the following call. truncated reports bytes that rotation discarded
 // before the first byte returned. limit must be positive.
