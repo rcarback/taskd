@@ -223,6 +223,46 @@ func TestTapCarriesSplitEscapeSequenceAcrossWrites(t *testing.T) {
 	}
 }
 
+func TestTapTrimsTrailingCarriageReturns(t *testing.T) {
+	// A PTY task writes CRLF, so every line arrives with a trailing '\r'
+	// that belongs to the line ending, not the line. A task that already
+	// writes its own "\r\n" doubles it to "\r\r\n" before ONLCR ever sees
+	// it, so the tap must strip every trailing '\r', not just one — while
+	// leaving an interior '\r', which is real output, untouched.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"single CRLF", "3/3 done\r\n", "3/3 done"},
+		{"doubled CR before LF", "3/3 done\r\r\n", "3/3 done"},
+		{"interior CR survives", "foo\rbar\n", "foo\rbar"},
+		{"line is only a CR", "\r\n", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sink bytes.Buffer
+			tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
+
+			events, cancel := tap.OnMatch("line", regexp.MustCompile(`.*`))
+			defer cancel()
+
+			if _, err := tap.Write([]byte(tc.in)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			select {
+			case e := <-events:
+				if e.Line != tc.want {
+					t.Errorf("Line = %q, want %q", e.Line, tc.want)
+				}
+			default:
+				t.Fatal("no event: the line never matched")
+			}
+		})
+	}
+}
+
 func TestTapCancelUnregisters(t *testing.T) {
 	var sink bytes.Buffer
 	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)

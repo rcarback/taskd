@@ -145,10 +145,16 @@ func (t *Tap) observe(p []byte) {
 		}
 		// A PTY task writes CRLF, so the byte before the newline this just
 		// found is a trailing '\r' that belongs to the line ending, not the
-		// line. Left in, it would reach every pattern, matcher, and counter,
-		// making a trailing-anchored regex never match and every reported
-		// line end in a character its caller did not write.
-		line := string(bytes.TrimSuffix(t.partial[:i], []byte("\r")))
+		// line. Strip every trailing '\r', not just one: ONLCR only adds the
+		// '\r' before NL, but a task that already writes its own "\r\n"
+		// arrives here as "\r\r\n", and TrimSuffix would leave one behind.
+		// TrimRight only ever touches the end of the slice, so an interior
+		// '\r' — real output, such as a progress bar's carriage return — is
+		// untouched. Left in, a trailing '\r' would reach every pattern,
+		// matcher, and counter, making a trailing-anchored regex never match
+		// and every reported line end in a character its caller did not
+		// write.
+		line := string(bytes.TrimRight(t.partial[:i], "\r"))
 		t.partial = t.partial[i+1:]
 		t.lines++
 		t.applyPatterns(line)
