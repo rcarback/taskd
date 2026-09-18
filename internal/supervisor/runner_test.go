@@ -5,6 +5,7 @@ package supervisor
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"syscall"
 	"testing"
@@ -169,6 +170,58 @@ func TestResultRecordsATimeSpan(t *testing.T) {
 	}
 	if got.Ended.Sub(got.Started) > time.Minute {
 		t.Fatalf("span of %v is implausible", got.Ended.Sub(got.Started))
+	}
+}
+
+func TestWriteSendsInputToAPipeTask(t *testing.T) {
+	var out bytes.Buffer
+	task, err := Start(Spec{Command: "cat", Stdin: true}, &out, clock.System())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := task.Write([]byte("ping\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := task.CloseInput(); err != nil {
+		t.Fatalf("CloseInput: %v", err)
+	}
+
+	if got := task.Wait(); got.State != StateExited {
+		t.Fatalf("State = %q, want exited", got.State)
+	}
+	if !strings.Contains(out.String(), "ping") {
+		t.Fatalf("output = %q, want the input echoed back", out.String())
+	}
+}
+
+func TestWriteWithoutAnInputChannelFails(t *testing.T) {
+	task, err := Start(Spec{Command: "sh", Args: []string{"-c", "exit 0"}}, io.Discard, clock.System())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	task.Wait()
+
+	if _, err := task.Write([]byte("x")); err == nil {
+		t.Fatal("Write succeeded on a task with no input channel")
+	}
+}
+
+func TestWriteSendsInputToAPTYTask(t *testing.T) {
+	var out bytes.Buffer
+	task, err := Start(Spec{Command: "cat", PTY: true}, &out, clock.System())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := task.Write([]byte("ping\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	// A terminal ends input on EOT rather than on a closed descriptor.
+	if _, err := task.Write([]byte{4}); err != nil {
+		t.Fatalf("Write EOT: %v", err)
+	}
+	task.Wait()
+	if !strings.Contains(out.String(), "ping") {
+		t.Fatalf("output = %q, want the input echoed back", out.String())
 	}
 }
 

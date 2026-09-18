@@ -21,6 +21,11 @@ type Spec struct {
 	Dir     string
 	Env     []string
 	PTY     bool
+
+	// Stdin opts a task on a plain pipe into an input channel. A task on a
+	// pseudo-terminal always has one, because the master is writable.
+	// os/exec fixes stdin at Start, so this cannot be added later.
+	Stdin bool
 }
 
 // errRecordingWriter wraps sink and records the first error sink.Write
@@ -76,6 +81,10 @@ type Task struct {
 	// started on a plain pipe, since cmd.Wait already waits for that copy to
 	// finish on its own.
 	pty *ptyStream
+	// stdin is set only for a task on a plain pipe that opted in with
+	// Spec.Stdin. It is nil for a task with no requested input channel, and
+	// unused for a pty task, which writes to pty.master instead.
+	stdin io.WriteCloser
 	// outputRec records the first error writing the task's output into
 	// sink, on either path.
 	outputRec *errRecordingWriter
@@ -98,6 +107,7 @@ func Start(spec Spec, sink io.Writer, clk clock.Clock) (*Task, error) {
 	rec := &errRecordingWriter{sink: sink}
 
 	var stream *ptyStream
+	var stdin io.WriteCloser
 	if spec.PTY {
 		s, err := startPTY(cmd, rec)
 		if err != nil {
@@ -107,12 +117,19 @@ func Start(spec Spec, sink io.Writer, clk clock.Clock) (*Task, error) {
 	} else {
 		cmd.Stdout = rec
 		cmd.Stderr = rec
+		if spec.Stdin {
+			in, err := cmd.StdinPipe()
+			if err != nil {
+				return nil, fmt.Errorf("supervisor: open stdin for %s: %w", spec.Command, err)
+			}
+			stdin = in
+		}
 		if err := cmd.Start(); err != nil {
 			return nil, fmt.Errorf("supervisor: start %s: %w", spec.Command, err)
 		}
 	}
 
-	t := &Task{cmd: cmd, clk: clk, done: make(chan struct{}), pty: stream, outputRec: rec}
+	t := &Task{cmd: cmd, clk: clk, done: make(chan struct{}), pty: stream, stdin: stdin, outputRec: rec}
 	go t.reap(startedAt)
 	return t, nil
 }
@@ -147,6 +164,44 @@ func (t *Task) Signal(sig os.Signal) error {
 	}
 	if err := t.cmd.Process.Signal(sig); err != nil {
 		return fmt.Errorf("supervisor: signal: %w", err)
+	}
+	return nil
+}
+
+// Write sends p to the task's input.
+//
+// A task on a pseudo-terminal writes to the master, which the child sees as
+// terminal input. A task on a pipe writes to the pipe, which it must have
+// requested with Spec.Stdin.
+func (t *Task) Write(p []byte) (int, error) {
+	if t.pty != nil {
+		n, err := t.pty.master.Write(p)
+		if err != nil {
+			return n, fmt.Errorf("supervisor: write to terminal: %w", err)
+		}
+		return n, nil
+	}
+	if t.stdin == nil {
+		return 0, fmt.Errorf("supervisor: task has no input channel; start it with Spec.Stdin or a pseudo-terminal")
+	}
+	n, err := t.stdin.Write(p)
+	if err != nil {
+		return n, fmt.Errorf("supervisor: write to stdin: %w", err)
+	}
+	return n, nil
+}
+
+// CloseInput signals end of input on a pipe task.
+//
+// A pseudo-terminal task has no equivalent: closing the master would end the
+// output copy as well. Send EOT (byte 4) instead, which the line discipline
+// turns into end of input.
+func (t *Task) CloseInput() error {
+	if t.stdin == nil {
+		return fmt.Errorf("supervisor: task has no input channel to close")
+	}
+	if err := t.stdin.Close(); err != nil {
+		return fmt.Errorf("supervisor: close stdin: %w", err)
 	}
 	return nil
 }
