@@ -20,9 +20,9 @@ func TestServerRegistersItsTools(t *testing.T) {
 		got[tool.Name] = true
 	}
 
-	// Task 1 registers task_status alone. Later tasks add the rest and
-	// extend this list.
-	for _, name := range []string{"task_status"} {
+	for _, name := range []string{
+		"task_status", "task_read", "task_search", "task_signal", "task_write",
+	} {
 		if !got[name] {
 			t.Errorf("tool %q is not registered; got %v", name, got)
 		}
