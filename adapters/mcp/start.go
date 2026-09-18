@@ -16,7 +16,7 @@ import (
 type PatternInput struct {
 	Name    string `json:"name"     jsonschema:"a short name you will read back in task_status"`
 	Regex   string `json:"regex"    jsonschema:"a Go regular expression"`
-	OnMatch string `json:"on_match" jsonschema:"record keeps a counter and the last match with its capture groups; kill ends the task; notify is recorded but wakes nobody, so use an until match condition to wake on output"`
+	OnMatch string `json:"on_match" jsonschema:"record keeps a counter and the last match with its capture groups, read through task_status; kill ends the task; notify is recorded but wakes nobody"`
 }
 
 // StartInput is task_start's input.

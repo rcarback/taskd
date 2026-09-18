@@ -21,8 +21,8 @@ context. A `kill -0` check reads a recycled process identifier and cannot
 report an exit code.
 
 **Start the job under supervision.** Call `task_start` with a `name` you will
-recognize later, and patterns for anything that should wake you or abort the
-run.
+recognize later, and patterns for anything that should be recorded or abort
+the run.
 
 **Wake on an event.** Call `task_wait` with `deliver: "notify"`. Choose the
 condition that matches what you are waiting for:
@@ -32,8 +32,11 @@ condition that matches what you are waiting for:
   cannot.
 - `elapsed` — N seconds pass and the task keeps running. This replaces
   `sleep`.
-- `match` — output matches a pattern.
 - `lines` — N new lines appear.
+
+`task_wait` has no condition for matched output. A pattern with
+`on_match: "record"` still counts a match and keeps the last line, read
+through `task_status`. Wake on `elapsed` or `idle` and check it then.
 
 Wake conditions never kill a task. Pass several ids to one call to watch
 several jobs at once.
