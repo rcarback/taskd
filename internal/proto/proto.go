@@ -9,9 +9,10 @@ import "encoding/json"
 // Verb names one operation the daemon performs.
 type Verb string
 
-// The verbs this plan implements. Plan 3 adds task_wait.
+// The verbs the daemon implements.
 const (
 	VerbStart  Verb = "task_start"
+	VerbWait   Verb = "task_wait"
 	VerbStatus Verb = "task_status"
 	VerbRead   Verb = "task_read"
 	VerbSearch Verb = "task_search"

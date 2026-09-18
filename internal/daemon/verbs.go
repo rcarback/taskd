@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -25,6 +26,7 @@ import (
 // Register installs every verb handler this plan implements.
 func (d *Daemon) Register() {
 	d.Handle(proto.VerbStart, jsonHandler(d.start))
+	d.Handle(proto.VerbWait, jsonHandler(d.wait))
 	d.Handle(proto.VerbStatus, jsonHandler(d.status))
 	d.Handle(proto.VerbRead, jsonHandler(d.read))
 	d.Handle(proto.VerbSearch, jsonHandler(d.search))
@@ -48,20 +50,92 @@ func (d *Daemon) Register() {
 var saveRecord = record.Save
 
 // jsonHandler adapts a typed handler into a Handler by decoding its params.
-func jsonHandler[P any, R any](fn func(P) (R, error)) Handler {
-	return func(raw json.RawMessage) (any, error) {
+func jsonHandler[P any, R any](fn func(context.Context, P) (R, error)) Handler {
+	return func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p P
 		if len(raw) > 0 {
 			if err := json.Unmarshal(raw, &p); err != nil {
 				return nil, fmt.Errorf("daemon: decode params: %w", err)
 			}
 		}
-		return fn(p)
+		return fn(ctx, p)
 	}
 }
 
+// entrySource adapts an Entry to watch.Source.
+type entrySource struct{ e *Entry }
+
+func (s entrySource) ID() string            { return s.e.Record().ID }
+func (s entrySource) Tap() *watch.Tap       { return s.e.Tap() }
+func (s entrySource) Done() <-chan struct{} { return s.e.Done() }
+
+// wait blocks until a condition fires on one of the named tasks.
+//
+// deliver "notify" has no delivery path until the wake adapters of a later
+// plan exist: this degrades it to block rather than failing the call,
+// because failing would teach the agent to stop asking for notification.
+// The long poll warning is never empty, so the caller reads the cost of
+// this call in the same tool result that answers it.
+func (d *Daemon) wait(ctx context.Context, p WaitParams) (WaitResult, error) {
+	if len(p.IDs) == 0 {
+		return WaitResult{}, fmt.Errorf("daemon: task_wait needs at least one id")
+	}
+
+	srcs := make([]watch.Source, 0, len(p.IDs))
+	for _, id := range p.IDs {
+		e, ok := d.Reg.Get(id)
+		if !ok {
+			return WaitResult{}, fmt.Errorf("daemon: no task %q", id)
+		}
+		if e.Tap() == nil {
+			// A task reconciled from a previous daemon's record has no
+			// live tap, so nothing can observe its output. Exit is the
+			// only condition that could still fire, and the record
+			// already says it ended. Reading status is the honest answer.
+			return WaitResult{}, fmt.Errorf(
+				"daemon: task %q is not owned by this daemon, so nothing watches its output; read task_status instead", id)
+		}
+		srcs = append(srcs, entrySource{e})
+	}
+
+	started := d.Clk.Now()
+	e, err := watch.Wait(ctx, d.Clk, srcs, p.Until)
+	if err != nil {
+		return WaitResult{}, err
+	}
+	blocked := int(d.Clk.Now().Sub(started).Seconds())
+
+	fired, _ := d.Reg.Get(e.TaskID)
+	rec := fired.Record()
+
+	return WaitResult{
+		ID:       e.TaskID,
+		Fired:    string(e.Kind),
+		Name:     e.Name,
+		Line:     e.Line,
+		Groups:   append([]string{}, e.Groups...),
+		State:    string(rec.State),
+		Exit:     rec.Exit,
+		BlockedS: blocked,
+		Warning:  longPollWarning(p.Deliver, blocked),
+	}, nil
+}
+
+// longPollWarning states the cost the caller just paid.
+//
+// It is never empty. Every wait in this plan blocks, and the agent decides
+// what to do next from the tool result, so the cost belongs there rather
+// than in a log the agent never reads.
+func longPollWarning(deliver string, blockedS int) string {
+	w := fmt.Sprintf("LONG-POLL: blocked this session for %ds.", blockedS)
+	if deliver == "notify" {
+		w += " Notification delivery unavailable here: no wake adapter is registered."
+	}
+	return w + " You could not answer questions or compact while blocked."
+}
+
 // start spawns a task and returns its id.
-func (d *Daemon) start(p StartParams) (StartResult, error) {
+func (d *Daemon) start(_ context.Context, p StartParams) (StartResult, error) {
 	if p.Command == "" {
 		return StartResult{}, fmt.Errorf("daemon: task_start needs a command")
 	}
@@ -236,7 +310,7 @@ func (d *Daemon) awaitKillPattern(e *Entry, tap *watch.Tap) {
 }
 
 // signal asks a task to stop, then insists after a grace period.
-func (d *Daemon) signal(p SignalParams) (SignalResult, error) {
+func (d *Daemon) signal(_ context.Context, p SignalParams) (SignalResult, error) {
 	if p.GraceS != nil && *p.GraceS < 0 {
 		// A negative grace makes clock.After fire at once, so SIGTERM would be
 		// followed by SIGKILL with no grace at all — the opposite of what a
@@ -286,7 +360,7 @@ func (d *Daemon) insist(e *Entry, task *supervisor.Task, grace int) {
 }
 
 // write sends input to a running task.
-func (d *Daemon) write(p WriteParams) (WriteResult, error) {
+func (d *Daemon) write(_ context.Context, p WriteParams) (WriteResult, error) {
 	e, ok := d.Reg.Get(p.ID)
 	if !ok {
 		return WriteResult{}, fmt.Errorf("daemon: no task %q", p.ID)
@@ -303,7 +377,7 @@ func (d *Daemon) write(p WriteParams) (WriteResult, error) {
 }
 
 // status reports terse state for the requested tasks, or lists.
-func (d *Daemon) status(p StatusParams) (StatusResult, error) {
+func (d *Daemon) status(_ context.Context, p StatusParams) (StatusResult, error) {
 	if len(p.IDs) > 0 {
 		out := make([]StatusEntry, 0, len(p.IDs))
 		for _, id := range p.IDs {
@@ -351,7 +425,7 @@ func statusOf(e *Entry) StatusEntry {
 }
 
 // read returns output by cursor, or the last N lines.
-func (d *Daemon) read(p ReadParams) (ReadResult, error) {
+func (d *Daemon) read(_ context.Context, p ReadParams) (ReadResult, error) {
 	if p.Since != nil && p.Tail != nil {
 		return ReadResult{}, fmt.Errorf("daemon: task_read takes since or tail, not both")
 	}
@@ -448,7 +522,7 @@ func rewind(next, cursor int64, pending int, live bool) int64 {
 }
 
 // search runs a regular expression over the retained log.
-func (d *Daemon) search(p SearchParams) (SearchResult, error) {
+func (d *Daemon) search(_ context.Context, p SearchParams) (SearchResult, error) {
 	re, err := regexp.Compile(p.Regex)
 	if err != nil {
 		return SearchResult{}, fmt.Errorf("daemon: task_search regex: %w", err)

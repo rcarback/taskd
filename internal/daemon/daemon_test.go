@@ -85,7 +85,7 @@ func roundTrip(t *testing.T, sock string, req proto.Request) proto.Response {
 
 func TestDaemonAnswersARegisteredVerb(t *testing.T) {
 	d, sock := start(t)
-	d.Handle(proto.VerbStatus, func(json.RawMessage) (any, error) {
+	d.Handle(proto.VerbStatus, func(context.Context, json.RawMessage) (any, error) {
 		return map[string]string{"hello": "world"}, nil
 	})
 
@@ -112,7 +112,7 @@ func TestDaemonRejectsAnUnknownVerb(t *testing.T) {
 
 func TestDaemonReportsAHandlerError(t *testing.T) {
 	d, sock := start(t)
-	d.Handle(proto.VerbStatus, func(json.RawMessage) (any, error) {
+	d.Handle(proto.VerbStatus, func(context.Context, json.RawMessage) (any, error) {
 		return nil, errBoom
 	})
 
@@ -131,7 +131,7 @@ func TestDaemonReportsAHandlerError(t *testing.T) {
 // nothing on it, and the client's only symptom was "proto: decode: EOF".
 func TestDaemonReportsAResponseItCannotSend(t *testing.T) {
 	d, sock := start(t)
-	d.Handle(proto.VerbStatus, func(json.RawMessage) (any, error) {
+	d.Handle(proto.VerbStatus, func(context.Context, json.RawMessage) (any, error) {
 		return strings.Repeat("a", proto.MaxMessageBytes+1), nil
 	})
 
@@ -362,7 +362,7 @@ func TestNewChmodsAnExistingRootTo0700(t *testing.T) {
 
 func TestDaemonRecoversFromAHandlerPanic(t *testing.T) {
 	d, sock := start(t)
-	d.Handle(proto.VerbStatus, func(json.RawMessage) (any, error) {
+	d.Handle(proto.VerbStatus, func(context.Context, json.RawMessage) (any, error) {
 		panic("boom")
 	})
 
