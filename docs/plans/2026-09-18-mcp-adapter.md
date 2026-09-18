@@ -99,7 +99,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func TestServerListsTheSevenTools(t *testing.T) {
+func TestServerRegistersItsTools(t *testing.T) {
 	cs := newSession(t)
 
 	got := map[string]bool{}
@@ -217,7 +217,7 @@ The helper file imports `encoding/json` for this.
 
 - [ ] **Step 4: Run the test to verify it fails**
 
-Run: `go test ./adapters/mcp/ -run TestServerLists -v`
+Run: `go test ./adapters/mcp/ -run TestServerRegisters -v`
 Expected: FAIL to build, with `undefined: mcpadapter.New`.
 
 - [ ] **Step 5: Write the call helper**
@@ -739,6 +739,8 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/rcarback/taskd/internal/daemon"
 )
 
 func TestStartRunsACommandAndReturnsAnID(t *testing.T) {
@@ -905,7 +907,7 @@ Add `s.addStart(srv)` to `New`, and add `"task_start"` to the expected names in 
 - [ ] **Step 5: Run the tests**
 
 Run: `go test ./adapters/mcp/ -race -v`
-Expected: PASS. If `TestStartRejectsAnUnknownPatternAction` fails, the daemon accepts an unknown action rather than validating it. Read `watch.CompilePatterns` and report which layer should reject it. Do not add a second validation layer here without ruling on it.
+Expected: PASS. `watch.CompilePatterns` (`internal/watch/pattern.go:78-84`) already rejects an unknown action with a message naming the three valid values, and `task_start` compiles patterns before it starts anything. The daemon is the validating layer. Do not add a second one in the adapter: a duplicate check drifts from the daemon's and produces two different messages for one mistake.
 
 - [ ] **Step 6: Commit**
 
