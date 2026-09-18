@@ -918,6 +918,7 @@ git commit -m "Add task records and one source of taskd paths"
   - `(*Daemon).Handle(v proto.Verb, h Handler)`, registers one verb
   - `daemon.Handler func(params json.RawMessage) (any, error)`
   - `daemon.Registry`, `daemon.Entry`, and the registry methods below
+  - `Entry`'s fields are unexported. Reach them through `Record()`, `SetState()`, `Live()`, `LiveTask()`, `LiveStore()`, `Dir()`, and `Finish()`.
 
 This task delivers a daemon that listens, dispatches, and answers. It registers no verbs. Tasks 6, 7, and 8 add them. A daemon that correctly reports "unknown verb" over a real socket is a testable deliverable, and it keeps the connection handling separate from the verb logic.
 
@@ -1023,36 +1024,101 @@ import (
 
 // Entry is one task the daemon owns.
 //
-// Task and Store are nil for a task that has ended: the daemon keeps the
+// Every field is unexported and reached only through the accessors below.
+// The mutex is worthless otherwise: a connection goroutine answering a verb
+// reads these while the goroutine waiting on the task clears them, and an
+// unguarded pointer read concurrent with a pointer write is a data race, not
+// merely a stale read.
+//
+// task and store are nil for a task that has ended: the daemon keeps the
 // record so status and reads still answer, and drops the live process and
 // its open log file.
 type Entry struct {
 	mu    sync.Mutex
-	Rec   record.Record
-	Task  *supervisor.Task
-	Store *output.Store
-	Dir   string
+	rec   record.Record
+	task  *supervisor.Task
+	store *output.Store
+	dir   string
 }
 
 // Record returns a copy of the entry's record.
 func (e *Entry) Record() record.Record {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.Rec
+	return e.rec
 }
 
 // SetState updates the entry's state under its own lock.
 func (e *Entry) SetState(s supervisor.State) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.Rec.State = s
+	e.rec.State = s
 }
 
 // Live reports whether the task is still running.
 func (e *Entry) Live() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.Rec.State == supervisor.StateRunning
+	return e.rec.State == supervisor.StateRunning
+}
+
+// LiveTask returns the running task, or nil once it has ended.
+func (e *Entry) LiveTask() *supervisor.Task {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.task
+}
+
+// LiveStore returns the open log store, or nil once the task has ended.
+func (e *Entry) LiveStore() *output.Store {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.store
+}
+
+// Dir returns the task's directory, which never changes after construction.
+func (e *Entry) Dir() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.dir
+}
+
+// Finish records the terminal result in one guarded write and clears both
+// live handles together, so no caller can observe a half-finished
+// transition.
+//
+// The switch is total over every state, and Exit is set only under
+// StateExited. Three separate Plan 1 defects came from presenting a
+// zero-value exit code as a real one; making the state decide which field
+// is written keeps that unrepresentable rather than merely documented.
+//
+// Task 6 replaces this with a version that also takes the byte counts,
+// remaps a requested kill to StateKilled, and closes the entry's done
+// channel.
+func (e *Entry) Finish(res supervisor.Result) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.rec.State = res.State
+	switch res.State {
+	case supervisor.StateExited:
+		code := res.ExitCode
+		e.rec.Exit = &code
+	case supervisor.StateSignaled:
+		e.rec.Signal = res.Signal.String()
+	case supervisor.StateRunning, supervisor.StateKilled, supervisor.StateFailed, supervisor.StateLost:
+		// Neither field applies: StateRunning is not terminal, and the
+		// other three carry no exit code or signal of their own.
+	}
+	ended := res.Ended
+	e.rec.EndedAt = &ended
+	if res.OutputErr != nil {
+		e.rec.OutputErr = res.OutputErr.Error()
+	}
+	e.rec.MaxRSSBytes = res.MaxRSSBytes
+
+	e.task = nil
+	e.store = nil
 }
 
 // Registry holds every task the daemon knows, live or finished.
@@ -2253,44 +2319,60 @@ const defaultOnOutputCap = "rotate"
 Add to `registry.go`:
 
 ```go
+// Task 4 already defines Entry with unexported fields and the guarded
+// accessors Record, SetState, Live, LiveTask, LiveStore, Dir, and Finish.
+// This task ADDS two unexported fields and the methods below. Do not
+// redeclare the struct and do not re-add an accessor Task 4 already has.
+//
 // done closes when the task reaches a terminal state. Callers use Done.
 // killRequested records that taskd asked for the kill, so the waiter can
 // report killed rather than signaled.
 type Entry struct {
-	mu            sync.Mutex
-	Rec           record.Record
-	Task          *supervisor.Task
-	Store         *output.Store
-	Dir           string
+	mu    sync.Mutex
+	rec   record.Record
+	task  *supervisor.Task
+	store *output.Store
+	dir   string
+
+	// added by this task
 	done          chan struct{}
 	killRequested bool
 }
 
 // NewEntry returns an entry whose Done channel is ready to use.
 func NewEntry(rec record.Record, dir string) *Entry {
-	return &Entry{Rec: rec, Dir: dir, done: make(chan struct{})}
+	return &Entry{rec: rec, dir: dir, done: make(chan struct{})}
 }
 
 // Done closes once the task has reached a terminal state.
 func (e *Entry) Done() <-chan struct{} { return e.done }
 
-// LiveTask returns the running task, or nil once it has ended.
-//
-// Every caller must go through this or through handles. finish clears Task
-// under the entry's lock, so reading the field directly races the moment a
-// task ends, and a cap timer firing at that moment would dereference nil.
-func (e *Entry) LiveTask() *supervisor.Task {
+// AttachStore and AttachTask record the live handles. They are separate
+// because the store exists before the process does: the entry joins the
+// registry with its store so a status read can find it, and the task is
+// set only once supervisor.Start has succeeded. Both take the same lock
+// Finish uses to clear the handles.
+func (e *Entry) AttachStore(store *output.Store) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.Task
+	e.store = store
+}
+
+func (e *Entry) AttachTask(task *supervisor.Task) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.task = task
 }
 
 // handles returns the task and its store together under one lock, for the
 // single goroutine that waits on the task and then closes its store.
+//
+// Reading the fields one at a time through LiveTask and LiveStore would let
+// Finish run between the two reads and hand back a mismatched pair.
 func (e *Entry) handles() (*supervisor.Task, *output.Store) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.Task, e.Store
+	return e.task, e.store
 }
 
 // RequestKill records that taskd asked for this task to end, so its
@@ -2301,45 +2383,53 @@ func (e *Entry) RequestKill() {
 	e.killRequested = true
 }
 
-// finish records the terminal result and closes Done exactly once.
-func (e *Entry) finish(res supervisor.Result, written, retained int64) record.Record {
+// Finish records the terminal result and closes Done exactly once.
+//
+// This task REPLACES the Finish that Task 4 defined, which took only a
+// Result. The extra parameters carry the byte counts, which the caller
+// reads from the store before this call clears the handle, and the return
+// value is the record to persist. The kill remap and the Done close are
+// also added here.
+func (e *Entry) Finish(res supervisor.Result, written, retained int64) record.Record {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.Rec.State = res.State
+	e.rec.State = res.State
 	if res.State == supervisor.StateSignaled {
-		e.Rec.Signal = res.Signal.String()
+		e.rec.Signal = res.Signal.String()
 		if e.killRequested {
 			// The spec reserves killed for a cap taskd applied or a client
 			// signal. The process really did die on a signal; what makes
 			// this killed rather than signaled is that taskd asked.
-			e.Rec.State = supervisor.StateKilled
+			e.rec.State = supervisor.StateKilled
 		}
 	}
 	if res.State == supervisor.StateExited {
 		code := res.ExitCode
-		e.Rec.Exit = &code
+		e.rec.Exit = &code
 	}
 	if res.OutputErr != nil {
-		e.Rec.OutputErr = res.OutputErr.Error()
+		e.rec.OutputErr = res.OutputErr.Error()
 	}
-	e.Rec.MaxRSSBytes = res.MaxRSSBytes
-	e.Rec.Written = written
-	e.Rec.Retained = retained
+	e.rec.MaxRSSBytes = res.MaxRSSBytes
+	e.rec.Written = written
+	e.rec.Retained = retained
 	ended := res.Ended
-	e.Rec.EndedAt = &ended
+	e.rec.EndedAt = &ended
 
-	// Clear both live handles under this lock. Entry.Log reads Store under
-	// the same lock and must never hand a caller a store that await has
-	// already closed.
-	e.Task = nil
-	e.Store = nil
+	// Clear both live handles under this lock. Entry.Log reads the store
+	// under the same lock and must never hand a caller a store that await
+	// has already closed.
+	e.task = nil
+	e.store = nil
 	close(e.done)
-	return e.Rec
+	return e.rec
 }
 ```
 
-`finish` sets `Exit` only under `StateExited`, which is the constraint three Plan 1 defects violated. Keep that guard.
+`Finish` sets `Exit` only under `StateExited`, which is the constraint three Plan 1 defects violated. Keep that guard, and keep the state switch total over every state so a new state cannot silently fall through.
+
+Everywhere else in this task and in Tasks 7 and 8, reach an entry's data through the accessors rather than the fields: `e.Dir()` not `e.Dir`, `e.Record()` not `e.Rec`, `e.LiveTask()` and `e.LiveStore()` not `e.Task` and `e.Store`, and `e.AttachStore(store)` / `e.AttachTask(task)` to set the live handles. The fields are unexported precisely so a connection goroutine cannot read one while the waiter clears it.
 
 - [ ] **Step 5: Write the handlers**
 
@@ -2420,7 +2510,7 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 	}
 
 	e := NewEntry(rec, dir)
-	e.Store = store
+	e.AttachStore(store)
 	if err := d.Reg.Add(e); err != nil {
 		_ = store.Close()
 		return StartResult{}, err
@@ -2436,7 +2526,7 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 		_ = record.Save(dir, e.Record())
 		return StartResult{}, err
 	}
-	e.Task = task
+	e.AttachTask(task)
 
 	if err := record.Save(dir, rec); err != nil {
 		return StartResult{}, err
@@ -2456,8 +2546,8 @@ func (d *Daemon) await(e *Entry) {
 	written, retained := store.Counts()
 	_ = store.Close()
 
-	rec := e.finish(res, written, retained)
-	_ = record.Save(e.Dir, rec)
+	rec := e.Finish(res, written, retained)
+	_ = record.Save(e.Dir(), rec)
 }
 
 // enforceCap ends the task after seconds, if it is still running.
@@ -2821,7 +2911,7 @@ Add `readOnly bool` to `Store` and guard `Append`:
 // log read-only from the record's byte counts and the release closes it.
 func (e *Entry) Log() (*output.Store, func(), error) {
 	e.mu.Lock()
-	live, rec, dir := e.Store, e.Rec, e.Dir
+	live, rec, dir := e.LiveStore(), e.Record(), e.Dir()
 	e.mu.Unlock()
 
 	if live != nil {
