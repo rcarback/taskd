@@ -32,11 +32,6 @@ type WaitInput struct {
 // spare, so nothing legitimate is excluded.
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 
-// untilPattern matches every string watch.ParseUntil can accept: a
-// comma-separated list of condition names, each optionally followed by
-// ":" and a signed integer.
-var untilPattern = regexp.MustCompile(`^[A-Za-z0-9+,:-]*$`)
-
 // WaitOutput is task_wait's output.
 //
 // Exactly one half is populated. Instruction is set when the harness can
@@ -57,21 +52,25 @@ type WaitOutput struct {
 // It costs two steps and no delivery code, and it rides a notification path
 // the harness already has.
 //
-// ids and until reach this function from the tool's caller and are about to
-// be written into a string the agent is told to run as a shell command, so
-// each is checked against the shape the daemon can actually produce or
-// accept before it is interpolated. An id or an until value that does not
-// match is rejected rather than escaped: escaping would still let a caller
-// spell out arbitrary flags to the taskd binary, and nothing legitimate
-// needs a character outside these patterns.
+// ids reaches this function from the tool's caller and is about to be
+// written into a string the agent is told to run as a shell command, so
+// each id is checked against the shape the daemon can actually produce
+// before it is interpolated. An id that does not match is rejected rather
+// than escaped: escaping would still let a caller spell out arbitrary
+// flags to the taskd binary, and nothing legitimate needs a character
+// outside this pattern.
+//
+// until carries no such check, because it is not the caller's raw text: it
+// is renderUntil's rendering of the conditions ParseUntil already parsed
+// and validated, so only a kind ParseUntil accepts can ever reach this
+// function. Checking it again here against a second, independently
+// maintained pattern is exactly the two-definitions-of-one-grammar problem
+// that produced a false rejection of "exit, idle:300" in an earlier round.
 func backgroundInstruction(root string, ids []string, until string) (string, error) {
 	for _, id := range ids {
 		if !idPattern.MatchString(id) {
 			return "", fmt.Errorf("mcp: task_wait: id %q is not a valid task id", id)
 		}
-	}
-	if !untilPattern.MatchString(until) {
-		return "", fmt.Errorf("mcp: task_wait: until %q is not a valid condition string", until)
 	}
 
 	var b strings.Builder
@@ -98,6 +97,32 @@ func shellQuoteSingle(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// renderUntil turns parsed conditions back into the command-line spelling
+// taskd wait's own --until flag accepts: kind names, optionally followed
+// by ":" and the argument, joined by commas with no spaces.
+//
+// This is the single place that defines how a Condition prints. Building
+// the emitted command from these conditions, rather than from the caller's
+// raw until string, means the grammar watch.ParseUntil already enforced is
+// the only grammar in play: nothing the parser rejected, including match,
+// can reach the shell command, and nothing this function accepts can
+// disagree with what the parser would accept back.
+func renderUntil(conds []watch.Condition) string {
+	parts := make([]string, 0, len(conds))
+	for _, c := range conds {
+		switch c.Type {
+		case watch.KindIdle, watch.KindElapsed:
+			parts = append(parts, fmt.Sprintf("%s:%d", c.Type, c.Seconds))
+		case watch.KindLines:
+			parts = append(parts, fmt.Sprintf("%s:%d", c.Type, c.N))
+		default:
+			// KindExit, and any future no-argument kind.
+			parts = append(parts, string(c.Type))
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
 func (s *server) addWait(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "task_wait",
@@ -122,7 +147,7 @@ func (s *server) addWait(srv *mcp.Server) {
 		// command that exits, so hand back the command rather than
 		// holding the call.
 		if s.harness == HarnessClaudeCode && in.Deliver == "notify" {
-			instr, err := backgroundInstruction(s.root, in.IDs, in.Until)
+			instr, err := backgroundInstruction(s.root, in.IDs, renderUntil(conds))
 			if err != nil {
 				return nil, WaitOutput{}, err
 			}

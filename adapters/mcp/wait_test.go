@@ -53,6 +53,66 @@ func TestWaitUnderClaudeCodeReturnsAnInstructionInsteadOfBlocking(t *testing.T) 
 	}
 }
 
+// TestWaitUnderClaudeCodeAcceptsUntilWithSpacesAfterCommas pins the
+// rendering path: watch.ParseUntil trims whitespace on each comma-separated
+// part, so "exit, idle:300" is valid input, and the emitted command must
+// carry the parser's own comma-separated spelling, not the caller's raw
+// text with its space intact.
+func TestWaitUnderClaudeCodeAcceptsUntilWithSpacesAfterCommas(t *testing.T) {
+	cs := newSessionFor(t, mcpadapter.HarnessClaudeCode)
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "task_wait",
+		Arguments: map[string]any{
+			"ids":     []any{"87e-v2"},
+			"until":   "exit, idle:300",
+			"deliver": "notify",
+		},
+	})
+	if err != nil {
+		t.Fatalf("calling task_wait: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("task_wait reported an error: %v", res.Content)
+	}
+
+	out := decodeStructured[mcpadapter.WaitOutput](t, res)
+	if !strings.Contains(out.Instruction, "--until exit,idle:300") {
+		t.Errorf("instruction = %q, want it to contain %q", out.Instruction, "--until exit,idle:300")
+	}
+}
+
+// TestWaitUnderClaudeCodeEmitsTheExactCommandForTwoIDsAndTwoConditions pins
+// the whole instruction string, byte for byte, for two ids and a
+// two-condition until.
+func TestWaitUnderClaudeCodeEmitsTheExactCommandForTwoIDsAndTwoConditions(t *testing.T) {
+	root := shortRoot(t)
+	cs := newSessionOnRoot(t, root, mcpadapter.HarnessClaudeCode)
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "task_wait",
+		Arguments: map[string]any{
+			"ids":     []any{"a1-aaa", "b2-bbb"},
+			"until":   "idle:300,lines:50",
+			"deliver": "notify",
+		},
+	})
+	if err != nil {
+		t.Fatalf("calling task_wait: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("task_wait reported an error: %v", res.Content)
+	}
+
+	out := decodeStructured[mcpadapter.WaitOutput](t, res)
+	want := "Run this as a background shell command. The harness notifies you when it exits:\n" +
+		"  taskd wait --root '" + root + "' --id a1-aaa --id b2-bbb --until idle:300,lines:50\n\n" +
+		"Do not call task_wait again for these ids. " + notificationBoundary
+	if out.Instruction != want {
+		t.Errorf("instruction =\n%q\nwant\n%q", out.Instruction, want)
+	}
+}
+
 func TestWaitUnderClaudeCodeRejectsAnIDWithAShellMetacharacter(t *testing.T) {
 	cs := newSessionFor(t, mcpadapter.HarnessClaudeCode)
 
