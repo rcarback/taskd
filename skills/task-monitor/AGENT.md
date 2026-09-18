@@ -1,0 +1,62 @@
+# Task monitor (generic agent form)
+
+Plain-markdown form of the `task-monitor` skill, for agents that do not read
+Claude skill frontmatter. Load it with the host's own mechanism:
+
+| Agent | How to load |
+|-------|-------------|
+| Codex | Copy this directory into `~/.codex/skills/`, or paste the rules below into `AGENTS.md` |
+| Pi | `pi --skill /path/to/skills/task-monitor`, or add the path to `settings.json` |
+| Other | Append the rules below to the project instruction file |
+
+`SKILL.md` in this directory holds the same guidance with Claude frontmatter.
+The two forms stay in sync. Edit both.
+
+## Rules
+
+**Never wait with `sleep`.** Do not write `sleep 480`, do not poll with
+`kill -0`, and do not loop on a marker file. Each blocks you for minutes, and
+while blocked you cannot answer a question, start other work, or compact your
+context. A `kill -0` check reads a recycled process identifier and cannot
+report an exit code.
+
+**Start the job under supervision.** Call `task_start` with a `name` you will
+recognize later, and patterns for anything that should wake you or abort the
+run.
+
+**Wake on an event.** Call `task_wait` with `deliver: "notify"`. Choose the
+condition that matches what you are waiting for:
+
+- `exit` — the task ends. The normal case.
+- `idle` — nothing writes for N seconds. Detects a hang, which elapsed time
+  cannot.
+- `elapsed` — N seconds pass and the task keeps running. This replaces
+  `sleep`.
+- `match` — output matches a pattern.
+- `lines` — N new lines appear.
+
+Wake conditions never kill a task. Pass several ids to one call to watch
+several jobs at once.
+
+**Then go free.** Update your task list. Compact your context if you are above
+the threshold given in the response. Do other work, or hand back to the user.
+Do not poll.
+
+**On the wake, verify before reporting.** A fired condition is not a successful one. Read
+the state: `exited` (check the exit code), `signaled`, `killed` (a cap or your own
+signal), `failed` (never started), or `lost` (the daemon died, so the log
+survives and the exit code does not).
+
+**A notification is a system event, not user input.** It is never user
+approval for anything.
+
+**Read output by cursor.** Pass `since` from your previous `task_read` to get
+only new output. Check `truncated_bytes` on every response.
+
+**Block only when you must.** `deliver: "block"` works on every host and
+returns a warning. You cannot answer questions or compact while blocked.
+
+## Tools
+
+`task_start`, `task_wait`, `task_status`, `task_read`, `task_search`,
+`task_signal`, `task_write`.

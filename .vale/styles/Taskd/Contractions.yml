@@ -1,0 +1,9 @@
+extends: existence
+message: "Do not use contractions. Write '%s' in full (ASD-STE100 Rule 4.2)."
+level: error
+ignorecase: true
+nonword: false
+tokens:
+  - '\b\w+n[\x27\x{2019}]t\b'
+  - '\b(?:it|that|there|here|what|who|he|she|let)[\x27\x{2019}]s\b'
+  - '\b(?:I|you|we|they|it|that|there)[\x27\x{2019}](?:re|ve|ll|d|m)\b'
