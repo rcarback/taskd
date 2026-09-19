@@ -100,3 +100,26 @@ object form.
 verb reads it back. The design's long-poll warning was meant to name the
 harness in its text; until that wiring exists, the field sits in every
 record with nothing consuming it.
+
+## `task_wait`'s notify path cannot see a task that failed to launch
+
+Under Claude Code with `deliver: "notify"`, `task_wait` resolves the
+caller's keys through `task_status` before it builds the background
+instruction. `task_status` reports state for any entry the registry holds,
+live tap or not, so it accepts a task whose record is in the `failed`
+state — the outcome of a `task_start` whose command does not exist.
+`task_wait` itself refuses the same entry: a nil tap means nothing can be
+watched, so the blocking path returns
+`task "NAME" never started; read task_status instead`.
+
+The notify path cannot see that distinction. It resolves the failed task's
+key to its id and returns a successful result carrying an instruction. The
+background `taskd wait` command then hits the same nil-tap rejection the
+instant it reaches the daemon and exits at once, with nothing in the exit
+itself to explain why. The harness reports the exit as a wake.
+
+The blocking path reports this case correctly today. Closing the gap on
+the notify path means teaching `resolveIDs` about tap state, which couples
+the adapter to daemon internals it has otherwise stayed clear of, for one
+narrow case: an agent that calls `task_start` and `task_wait` in sequence
+without reading the first result.
