@@ -1,0 +1,279 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package watch_test
+
+import (
+	"bytes"
+	"regexp"
+	"testing"
+	"time"
+
+	"github.com/rcarback/taskd/internal/clock"
+	"github.com/rcarback/taskd/internal/watch"
+)
+
+func TestTapPassesRawBytesThrough(t *testing.T) {
+	// The log must hold exactly what the task produced, escape sequences
+	// and all. Only the matching view is stripped.
+	var sink bytes.Buffer
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
+
+	raw := []byte("\x1b[31merror:\x1b[0m boom\n")
+	n, err := tap.Write(raw)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(raw) {
+		t.Errorf("Write returned %d, want %d: a short count makes io.Copy report a failure", n, len(raw))
+	}
+	if got := sink.Bytes(); !bytes.Equal(got, raw) {
+		t.Errorf("sink holds %q, want the raw bytes %q", got, raw)
+	}
+}
+
+func TestTapCountsCompleteLinesOnly(t *testing.T) {
+	var sink bytes.Buffer
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
+
+	if _, err := tap.Write([]byte("one\ntwo\nthr")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := tap.Lines(); got != 2 {
+		t.Errorf("Lines() = %d, want 2: the third line has no newline yet", got)
+	}
+	if _, err := tap.Write([]byte("ee\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := tap.Lines(); got != 3 {
+		t.Errorf("Lines() = %d, want 3 once the line completes", got)
+	}
+}
+
+func TestTapMatchesAcrossAChunkBoundary(t *testing.T) {
+	// A pattern that straddles two writes must still match. Splitting on
+	// arrival rather than on lines is the classic way to miss it.
+	var sink bytes.Buffer
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
+
+	events, cancel := tap.OnMatch("err", regexp.MustCompile(`error:`))
+	defer cancel()
+
+	if _, err := tap.Write([]byte("bui")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	select {
+	case e := <-events:
+		t.Fatalf("fired early on a partial line: %+v", e)
+	default:
+	}
+
+	if _, err := tap.Write([]byte("ld error: boom\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	select {
+	case e := <-events:
+		if e.Kind != watch.KindMatch {
+			t.Errorf("Kind = %q, want %q", e.Kind, watch.KindMatch)
+		}
+		if e.Name != "err" {
+			t.Errorf("Name = %q, want %q", e.Name, "err")
+		}
+		if e.Line != "build error: boom" {
+			t.Errorf("Line = %q, want the whole joined line", e.Line)
+		}
+	default:
+		t.Fatal("no event: the pattern straddled the chunk boundary and was missed")
+	}
+}
+
+func TestTapStripsEscapesBeforeMatching(t *testing.T) {
+	// A colour code sitting inside the word must not stop the match.
+	var sink bytes.Buffer
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
+
+	events, cancel := tap.OnMatch("err", regexp.MustCompile(`^error: boom$`))
+	defer cancel()
+
+	if _, err := tap.Write([]byte("\x1b[31merror:\x1b[0m boom\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	select {
+	case e := <-events:
+		if e.Line != "error: boom" {
+			t.Errorf("Line = %q, want the stripped line", e.Line)
+		}
+	default:
+		t.Fatal("no event: the escape sequences were not stripped before matching")
+	}
+}
+
+func TestTapMatchFiresOnce(t *testing.T) {
+	var sink bytes.Buffer
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
+
+	events, cancel := tap.OnMatch("err", regexp.MustCompile(`error`))
+	defer cancel()
+
+	if _, err := tap.Write([]byte("error one\nerror two\nerror three\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if _, ok := <-events; !ok {
+		t.Fatal("channel closed without an event")
+	}
+	select {
+	case e, ok := <-events:
+		if ok {
+			t.Fatalf("second event %+v: a waiter fires once and unregisters", e)
+		}
+	default:
+		t.Fatal("channel still open after firing: the tap must close it so a waiter cannot block")
+	}
+}
+
+func TestTapOnLinesFiresAtTheThreshold(t *testing.T) {
+	var sink bytes.Buffer
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
+
+	events, cancel := tap.OnLines(3)
+	defer cancel()
+
+	if _, err := tap.Write([]byte("a\nb\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	select {
+	case e := <-events:
+		t.Fatalf("fired at 2 lines: %+v", e)
+	default:
+	}
+
+	if _, err := tap.Write([]byte("c\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	select {
+	case e := <-events:
+		if e.Kind != watch.KindLines {
+			t.Errorf("Kind = %q, want %q", e.Kind, watch.KindLines)
+		}
+		if e.Count != 3 {
+			t.Errorf("Count = %d, want 3", e.Count)
+		}
+	default:
+		t.Fatal("no event at the threshold")
+	}
+}
+
+func TestTapLastWriteTracksTheClock(t *testing.T) {
+	start := time.Unix(1_000, 0)
+	fake := clock.NewFake(start)
+	var sink bytes.Buffer
+	tap := watch.NewTap(&sink, fake, nil)
+
+	if got := tap.LastWrite(); !got.Equal(start) {
+		t.Errorf("LastWrite() = %v before any write, want the start time %v", got, start)
+	}
+
+	fake.Advance(30 * time.Second)
+	if _, err := tap.Write([]byte("x\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, want := tap.LastWrite(), start.Add(30*time.Second); !got.Equal(want) {
+		t.Errorf("LastWrite() = %v, want %v", got, want)
+	}
+}
+
+func TestTapCarriesSplitEscapeSequenceAcrossWrites(t *testing.T) {
+	// An escape sequence split across two Write calls must still be
+	// stripped as one sequence: ansi.Strip reports the trailing,
+	// unfinished bytes as pendingLen, and the tap must carry them into the
+	// next Write via t.pending rather than match them as literal text.
+	var sink bytes.Buffer
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
+
+	events, cancel := tap.OnMatch("err", regexp.MustCompile(`^error: boom$`))
+	defer cancel()
+
+	first := []byte("\x1b[3")
+	second := []byte("1merror: boom\x1b[0m\n")
+
+	if _, err := tap.Write(first); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	select {
+	case e := <-events:
+		t.Fatalf("fired before the sequence and the line completed: %+v", e)
+	default:
+	}
+
+	if _, err := tap.Write(second); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	want := append(append([]byte{}, first...), second...)
+	if got := sink.Bytes(); !bytes.Equal(got, want) {
+		t.Errorf("sink holds %q, want the raw bytes %q", got, want)
+	}
+
+	select {
+	case e := <-events:
+		if e.Line != "error: boom" {
+			t.Errorf("Line = %q, want the line stripped and joined across the split", e.Line)
+		}
+	default:
+		t.Fatal("no event: the split escape sequence was not carried into the next write")
+	}
+}
+
+func TestTapTrimsTrailingCarriageReturns(t *testing.T) {
+	// A PTY task writes CRLF, so every line arrives with a trailing '\r'
+	// that belongs to the line ending, not the line. A task that already
+	// writes its own "\r\n" doubles it to "\r\r\n" before ONLCR ever sees
+	// it, so the tap must strip every trailing '\r', not just one — while
+	// leaving an interior '\r', which is real output, untouched.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"single CRLF", "3/3 done\r\n", "3/3 done"},
+		{"doubled CR before LF", "3/3 done\r\r\n", "3/3 done"},
+		{"interior CR survives", "foo\rbar\n", "foo\rbar"},
+		{"line is only a CR", "\r\n", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sink bytes.Buffer
+			tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
+
+			events, cancel := tap.OnMatch("line", regexp.MustCompile(`.*`))
+			defer cancel()
+
+			if _, err := tap.Write([]byte(tc.in)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			select {
+			case e := <-events:
+				if e.Line != tc.want {
+					t.Errorf("Line = %q, want %q", e.Line, tc.want)
+				}
+			default:
+				t.Fatal("no event: the line never matched")
+			}
+		})
+	}
+}
+
+func TestTapCancelUnregisters(t *testing.T) {
+	var sink bytes.Buffer
+	tap := watch.NewTap(&sink, clock.NewFake(time.Unix(0, 0)), nil)
+
+	events, cancel := tap.OnMatch("err", regexp.MustCompile(`error`))
+	cancel()
+
+	if _, err := tap.Write([]byte("error here\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if _, ok := <-events; ok {
+		t.Fatal("a cancelled waiter received an event")
+	}
+}

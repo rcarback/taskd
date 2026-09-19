@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rcarback/taskd/internal/proto"
+	"github.com/rcarback/taskd/internal/watch"
 )
 
 // StartParams is task_start's input.
@@ -29,12 +30,54 @@ type StartParams struct {
 	Harness     string   `json:"harness,omitempty"`
 	Session     string   `json:"session,omitempty"`
 	MaxOutput   int64    `json:"max_output,omitempty"`
+
+	// Patterns are evaluated against every complete line of output. They
+	// are what keeps task_status cheap: a record pattern turns a log into
+	// a counter and one line.
+	Patterns []watch.Pattern `json:"patterns,omitempty"`
 }
 
 // StartResult is task_start's output.
 type StartResult struct {
 	ID   string `json:"id"`
 	Name string `json:"name,omitempty"`
+}
+
+// WaitParams is task_wait's input.
+//
+// Until omitted means the default set: exit plus idle at 300 seconds. There
+// is deliberately no absolute component in that default — silence catches a
+// hung task, and elapsed time cannot tell one from a slow one.
+type WaitParams struct {
+	IDs     []string          `json:"ids"`
+	Until   []watch.Condition `json:"until,omitempty"`
+	Deliver string            `json:"deliver,omitempty"`
+}
+
+// WaitResult is task_wait's output.
+//
+// State and Exit describe the task at the moment the condition fired, which
+// for every condition except exit means the task is still running and Exit
+// is nil. A caller reads State before Exit: a task a signal ended has no
+// meaningful exit code, and a zero there would read as success.
+type WaitResult struct {
+	ID     string   `json:"id"`
+	Fired  string   `json:"fired"`
+	Name   string   `json:"name,omitempty"`
+	Line   string   `json:"line,omitempty"`
+	Groups []string `json:"groups"`
+
+	State string `json:"state"`
+	Exit  *int   `json:"exit_code,omitempty"`
+
+	// BlockedS is how long this call held the caller. It is the number the
+	// warning quotes.
+	BlockedS int `json:"blocked_s"`
+
+	// Warning carries the long poll notice. It is never empty in this
+	// plan: every wait blocks, and the agent needs to read that in the
+	// tool result, where it makes its next decision.
+	Warning string `json:"warning"`
 }
 
 // StatusParams is task_status's input. With no IDs it lists.
@@ -61,6 +104,10 @@ type StatusEntry struct {
 	StartedAt time.Time  `json:"started_at"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	OutputErr string     `json:"output_err,omitempty"`
+
+	// Patterns reports each pattern's counter and last hit. It is never
+	// nil, so a client can iterate it without testing for JSON null.
+	Patterns []watch.PatternState `json:"patterns"`
 }
 
 // StatusResult is task_status's output.

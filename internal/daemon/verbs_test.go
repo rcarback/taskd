@@ -46,7 +46,7 @@ func callVerb(t *testing.T, d *Daemon, verb string, v any) (any, error) {
 	if h == nil {
 		t.Fatalf("no handler for %s", verb)
 	}
-	return h(b)
+	return h(t.Context(), b)
 }
 
 // waitForState blocks until the entry reaches a terminal state.

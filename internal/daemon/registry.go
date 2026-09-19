@@ -12,6 +12,7 @@ import (
 	"github.com/rcarback/taskd/internal/output"
 	"github.com/rcarback/taskd/internal/record"
 	"github.com/rcarback/taskd/internal/supervisor"
+	"github.com/rcarback/taskd/internal/watch"
 )
 
 // Entry is one task the daemon owns.
@@ -20,9 +21,9 @@ import (
 // read LiveTask or LiveStore concurrently with a reaper clearing them at
 // Finish, and that is a real data race, not just a stale read, if either
 // side touches the field without the lock. Record, SetState, Live,
-// LiveTask, LiveStore, Dir, Done, AttachStore, AttachTask, RequestKill,
-// Finish, and Fail are the entire surface for touching an Entry from
-// outside this file.
+// LiveTask, LiveStore, Dir, Done, AttachStore, AttachTask, AttachTap, Tap,
+// RequestKill, Finish, and Fail are the entire surface for touching an
+// Entry from outside this file.
 //
 // LiveTask and LiveStore are nil for a task that has ended: the daemon
 // keeps the record so status and reads still answer, and drops the live
@@ -39,6 +40,7 @@ type Entry struct {
 	task  *supervisor.Task
 	store *output.Store
 	dir   string
+	tap   *watch.Tap
 
 	done          chan struct{}
 	killRequested bool
@@ -113,6 +115,23 @@ func (e *Entry) AttachTask(task *supervisor.Task) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.task = task
+}
+
+// AttachTap records the entry's output tap. It follows AttachStore: the tap
+// exists before the process does, because it is the sink supervisor.Start
+// writes into.
+func (e *Entry) AttachTap(tap *watch.Tap) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.tap = tap
+}
+
+// Tap returns the entry's output tap, or nil for a task this daemon did not
+// start — one reconciled from a record left by a previous daemon.
+func (e *Entry) Tap() *watch.Tap {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.tap
 }
 
 // Log returns a store for reading this task's output, plus a release

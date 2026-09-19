@@ -5,20 +5,26 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
+	"github.com/rcarback/taskd/internal/client"
 	"github.com/rcarback/taskd/internal/clock"
 	"github.com/rcarback/taskd/internal/daemon"
 	"github.com/rcarback/taskd/internal/output"
 	"github.com/rcarback/taskd/internal/paths"
+	"github.com/rcarback/taskd/internal/proto"
 	"github.com/rcarback/taskd/internal/supervisor"
 	"github.com/rcarback/taskd/internal/taskdir"
+	"github.com/rcarback/taskd/internal/watch"
 )
 
 func main() {
@@ -37,6 +43,8 @@ func dispatch(args []string, stdout io.Writer) int {
 	switch args[0] {
 	case "run":
 		return run(args[1:], stdout)
+	case "wait":
+		return wait(args[1:], stdout)
 	case "serve":
 		return serve(args[1:], stdout)
 	default:
@@ -45,7 +53,9 @@ func dispatch(args []string, stdout io.Writer) int {
 	}
 }
 
-const usage = "usage: taskd run [flags] -- COMMAND [ARGS...]\n       taskd serve [--root DIR]"
+const usage = "usage: taskd run [flags] -- COMMAND [ARGS...]\n" +
+	"       taskd wait --id ID [--id ID...] [--until exit,idle:300]\n" +
+	"       taskd serve [--root DIR]"
 
 // serve runs the daemon in the foreground until a signal ends it.
 func serve(args []string, stdout io.Writer) int {
@@ -126,6 +136,68 @@ func run(args []string, stdout io.Writer) int {
 	res := task.Wait()
 	reportResult(stdout, id, res, store.Written())
 	return exitCode(res)
+}
+
+// idList collects a repeated --id flag.
+type idList []string
+
+func (l *idList) String() string { return strings.Join(*l, ",") }
+
+func (l *idList) Set(v string) error {
+	if v == "" {
+		return errors.New("an id cannot be empty")
+	}
+	*l = append(*l, v)
+	return nil
+}
+
+// wait blocks until a condition fires and prints the result as JSON.
+//
+// This is the Claude Code wake path. The agent runs it as a background
+// command and the harness notifies the session when it exits, so taskd
+// needs no delivery code of its own for that harness.
+func wait(args []string, stdout io.Writer) int {
+	fs := flag.NewFlagSet("taskd wait", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var ids idList
+	fs.Var(&ids, "id", "task id to wait on; repeat for several")
+	until := fs.String("until", "", "conditions, for example exit,idle:300 (default exit,idle:300)")
+	root := fs.String("root", paths.Root(), "directory that holds task records")
+	if err := fs.Parse(args); err != nil {
+		_, _ = fmt.Fprintf(stdout, "taskd: %v\n%s\n", err, usage)
+		return 2
+	}
+	if len(ids) == 0 {
+		_, _ = fmt.Fprintf(stdout, "taskd: wait needs at least one --id\n%s\n", usage)
+		return 2
+	}
+
+	conds, err := watch.ParseUntil(*until)
+	if err != nil {
+		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
+		return 2
+	}
+
+	params, err := json.Marshal(daemon.WaitParams{IDs: ids, Until: conds, Deliver: "block"})
+	if err != nil {
+		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
+		return 1
+	}
+
+	resp, err := client.Call(*root, proto.Request{Verb: proto.VerbWait, Params: params})
+	if err != nil {
+		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
+		return 1
+	}
+	if !resp.OK {
+		_, _ = fmt.Fprintf(stdout, "taskd: %s\n", resp.Error)
+		return 1
+	}
+
+	// The raw result goes to stdout so the agent reads the same fields the
+	// socket carried, including the long poll warning.
+	_, _ = fmt.Fprintf(stdout, "%s\n", resp.Result)
+	return 0
 }
 
 // reportResult prints the task's terminal state and, when the output sink

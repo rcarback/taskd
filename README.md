@@ -3,9 +3,10 @@
 Supervised long-running tasks for coding agents. Wake on exit, silence, or a
 matched pattern instead of polling with `sleep`.
 
-Status: **design approved, not implemented.** The design is in
-[docs/design/2026-09-17-taskd-design.md](docs/superpowers/specs/2026-09-17-taskd-design.md).
-No daemon exists yet.
+Status: **daemon implemented.** The daemon, its seven verbs, and the wake
+engine exist, along with two CLI subcommands, `run` and `wait`. The design is
+in
+[docs/design/2026-09-17-taskd-design.md](docs/design/2026-09-17-taskd-design.md).
 
 ## The problem
 
@@ -62,9 +63,9 @@ Seven tools: `task_start`, `task_wait`, `task_status`, `task_read`,
 
 | Host | Wake path | Status |
 |------|-----------|--------|
-| Pi | Extension pushes a turn in process | Confirmed |
+| Pi | Extension pushes a turn in process | Adapter not built yet, uses long poll |
 | Claude Code | Background waiter, host notifies on exit | Works today |
-| Codex | `codex queue --thread` | Unverified, uses long poll until tested |
+| Codex | `codex queue --thread` | Adapter not built yet, uses long poll |
 
 Long poll works everywhere and always returns a warning, because a blocked
 agent is the problem this tool exists to remove.

@@ -58,7 +58,7 @@ func TestCallReachesARunningDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
 	}
-	d.Handle(proto.VerbStatus, func(json.RawMessage) (any, error) {
+	d.Handle(proto.VerbStatus, func(context.Context, json.RawMessage) (any, error) {
 		return map[string]int{"n": 1}, nil
 	})
 

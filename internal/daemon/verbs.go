@@ -3,7 +3,9 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -19,11 +21,13 @@ import (
 	"github.com/rcarback/taskd/internal/record"
 	"github.com/rcarback/taskd/internal/supervisor"
 	"github.com/rcarback/taskd/internal/taskdir"
+	"github.com/rcarback/taskd/internal/watch"
 )
 
 // Register installs every verb handler this plan implements.
 func (d *Daemon) Register() {
 	d.Handle(proto.VerbStart, jsonHandler(d.start))
+	d.Handle(proto.VerbWait, jsonHandler(d.wait))
 	d.Handle(proto.VerbStatus, jsonHandler(d.status))
 	d.Handle(proto.VerbRead, jsonHandler(d.read))
 	d.Handle(proto.VerbSearch, jsonHandler(d.search))
@@ -47,20 +51,116 @@ func (d *Daemon) Register() {
 var saveRecord = record.Save
 
 // jsonHandler adapts a typed handler into a Handler by decoding its params.
-func jsonHandler[P any, R any](fn func(P) (R, error)) Handler {
-	return func(raw json.RawMessage) (any, error) {
+func jsonHandler[P any, R any](fn func(context.Context, P) (R, error)) Handler {
+	return func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p P
 		if len(raw) > 0 {
 			if err := json.Unmarshal(raw, &p); err != nil {
 				return nil, fmt.Errorf("daemon: decode params: %w", err)
 			}
 		}
-		return fn(p)
+		return fn(ctx, p)
 	}
 }
 
+// entrySource adapts an Entry to watch.Source.
+type entrySource struct{ e *Entry }
+
+func (s entrySource) ID() string            { return s.e.Record().ID }
+func (s entrySource) Tap() *watch.Tap       { return s.e.Tap() }
+func (s entrySource) Done() <-chan struct{} { return s.e.Done() }
+
+// wait blocks until a condition fires on one of the named tasks.
+//
+// deliver "notify" has no delivery path until the wake adapters of a later
+// plan exist: this degrades it to block rather than failing the call,
+// because failing would teach the agent to stop asking for notification.
+// The long poll warning is never empty, so the caller reads the cost of
+// this call in the same tool result that answers it.
+func (d *Daemon) wait(ctx context.Context, p WaitParams) (WaitResult, error) {
+	if len(p.IDs) == 0 {
+		return WaitResult{}, fmt.Errorf("daemon: task_wait needs at least one id")
+	}
+
+	srcs := make([]watch.Source, 0, len(p.IDs))
+	for _, id := range p.IDs {
+		e, ok := d.Reg.Get(id)
+		if !ok {
+			return WaitResult{}, fmt.Errorf("daemon: no task %q", id)
+		}
+		if e.Tap() == nil {
+			if e.Record().State == supervisor.StateFailed {
+				// The only path that reaches a nil tap today:
+				// supervisor.Start itself failed, and Fail recorded a
+				// terminal state with no tap ever attached. The task
+				// never ran, so there is no output to wait on.
+				return WaitResult{}, fmt.Errorf(
+					"daemon: task %q never started; read task_status instead", id)
+			}
+			// A task reconciled from a previous daemon's record has no
+			// live tap, so nothing can observe its output. Exit is the
+			// only condition that could still fire, and the record
+			// already says it ended. Reading status is the honest answer.
+			return WaitResult{}, fmt.Errorf(
+				"daemon: task %q is not owned by this daemon, so nothing watches its output; read task_status instead", id)
+		}
+		srcs = append(srcs, entrySource{e})
+	}
+
+	started := d.Clk.Now()
+	e, err := watch.Wait(ctx, d.Clk, srcs, p.Until)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// ctx ended because the peer hung up, or the daemon is
+			// shutting down — see serveConn's per-connection context in
+			// daemon.go. Nobody is left to read an answer either way, so
+			// this returns the bare ctx error rather than building one
+			// for a reply that will never be sent: serveConn checks its
+			// own context before writing and skips the write entirely
+			// once it is done.
+			return WaitResult{}, err
+		}
+		// Every other case — chiefly watch.ErrNoConditionCanFire, matched
+		// through errors.Is rather than message text — is a real answer a
+		// still-connected caller is waiting on, so it is named plainly.
+		return WaitResult{}, fmt.Errorf("daemon: task_wait: %w", err)
+	}
+	blocked := int(d.Clk.Now().Sub(started).Seconds())
+
+	fired, ok := d.Reg.Get(e.TaskID)
+	if !ok {
+		return WaitResult{}, fmt.Errorf("daemon: task_wait: task %q vanished from the registry", e.TaskID)
+	}
+	rec := fired.Record()
+
+	return WaitResult{
+		ID:       e.TaskID,
+		Fired:    string(e.Kind),
+		Name:     e.Name,
+		Line:     e.Line,
+		Groups:   append([]string{}, e.Groups...),
+		State:    string(rec.State),
+		Exit:     rec.Exit,
+		BlockedS: blocked,
+		Warning:  longPollWarning(p.Deliver, blocked),
+	}, nil
+}
+
+// longPollWarning states the cost the caller just paid.
+//
+// It is never empty. Every wait in this plan blocks, and the agent decides
+// what to do next from the tool result, so the cost belongs there rather
+// than in a log the agent never reads.
+func longPollWarning(deliver string, blockedS int) string {
+	w := fmt.Sprintf("LONG-POLL: blocked this session for %ds.", blockedS)
+	if deliver == "notify" {
+		w += " Notification delivery unavailable here: no wake adapter is registered."
+	}
+	return w + " You could not answer questions or compact while blocked."
+}
+
 // start spawns a task and returns its id.
-func (d *Daemon) start(p StartParams) (StartResult, error) {
+func (d *Daemon) start(_ context.Context, p StartParams) (StartResult, error) {
 	if p.Command == "" {
 		return StartResult{}, fmt.Errorf("daemon: task_start needs a command")
 	}
@@ -81,6 +181,14 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 		return StartResult{}, fmt.Errorf(
 			"daemon: on_output_cap %q is not implemented yet; only %q is. A killing cap needs the overflow signal that arrives with pattern support",
 			outputCap, defaultOnOutputCap)
+	}
+
+	// Compiled before any resource exists for this task, so an uncompilable
+	// pattern fails fast with nothing to clean up: no directory, no store, no
+	// registry entry left orphaned and never reaching a terminal state.
+	pats, err := watch.CompilePatterns(p.Patterns)
+	if err != nil {
+		return StartResult{}, err
 	}
 
 	dir, id, err := taskdir.New(d.Root)
@@ -119,6 +227,8 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 		return StartResult{}, err
 	}
 
+	tap := watch.NewTap(storeWriter{store}, d.Clk, pats)
+
 	// A non-PTY task gets no stdin pipe, so os/exec hands it /dev/null and a
 	// task that reads standard input sees end of input at once. Opting it
 	// into Spec.Stdin instead would give every such task a pipe that nothing
@@ -130,7 +240,7 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 	task, err := supervisor.Start(supervisor.Spec{
 		Command: p.Command, Args: p.Args, Dir: p.Cwd,
 		Env: os.Environ(), PTY: usePTY,
-	}, storeWriter{store}, d.Clk)
+	}, tap, d.Clk)
 	if err != nil {
 		_ = store.Close()
 		// Fail gives this record the same terminal shape Finish gives every
@@ -143,6 +253,8 @@ func (d *Daemon) start(p StartParams) (StartResult, error) {
 		return StartResult{}, err
 	}
 	e.AttachTask(task)
+	e.AttachTap(tap)
+	go d.awaitKillPattern(e, tap)
 
 	// Best-effort: the process is already running at this point, so a
 	// failure to persist its initial metadata must not stop it from being
@@ -201,8 +313,29 @@ func (d *Daemon) enforceCap(e *Entry, seconds int) {
 	}
 }
 
+// awaitKillPattern ends the task when a kill pattern matches.
+//
+// It mirrors enforceCap: both end a task the client did not explicitly
+// signal, and both run only because the caller opted in — enforceCap
+// through kill_after_s, this through on_match: "kill".
+func (d *Daemon) awaitKillPattern(e *Entry, tap *watch.Tap) {
+	select {
+	case <-e.Done():
+	case _, ok := <-tap.Killed():
+		if !ok {
+			return // the channel closed without a match
+		}
+		task := e.LiveTask()
+		if task == nil {
+			return // it ended while the pattern was matching
+		}
+		e.RequestKill()
+		_ = task.Signal(syscall.SIGKILL)
+	}
+}
+
 // signal asks a task to stop, then insists after a grace period.
-func (d *Daemon) signal(p SignalParams) (SignalResult, error) {
+func (d *Daemon) signal(_ context.Context, p SignalParams) (SignalResult, error) {
 	if p.GraceS != nil && *p.GraceS < 0 {
 		// A negative grace makes clock.After fire at once, so SIGTERM would be
 		// followed by SIGKILL with no grace at all — the opposite of what a
@@ -252,7 +385,7 @@ func (d *Daemon) insist(e *Entry, task *supervisor.Task, grace int) {
 }
 
 // write sends input to a running task.
-func (d *Daemon) write(p WriteParams) (WriteResult, error) {
+func (d *Daemon) write(_ context.Context, p WriteParams) (WriteResult, error) {
 	e, ok := d.Reg.Get(p.ID)
 	if !ok {
 		return WriteResult{}, fmt.Errorf("daemon: no task %q", p.ID)
@@ -269,7 +402,7 @@ func (d *Daemon) write(p WriteParams) (WriteResult, error) {
 }
 
 // status reports terse state for the requested tasks, or lists.
-func (d *Daemon) status(p StatusParams) (StatusResult, error) {
+func (d *Daemon) status(_ context.Context, p StatusParams) (StatusResult, error) {
 	if len(p.IDs) > 0 {
 		out := make([]StatusEntry, 0, len(p.IDs))
 		for _, id := range p.IDs {
@@ -300,16 +433,25 @@ func (d *Daemon) status(p StatusParams) (StatusResult, error) {
 // statusOf converts an entry to its terse form.
 func statusOf(e *Entry) StatusEntry {
 	r := e.Record()
+	// Never nil: a task with no live tap — because it failed to launch, or
+	// because it was reconciled from a previous daemon's record — has
+	// nothing to report patterns from, and a client iterating patterns still
+	// wants [] rather than JSON null.
+	pats := []watch.PatternState{}
+	if tap := e.Tap(); tap != nil {
+		pats = tap.Stats()
+	}
 	return StatusEntry{
 		ID: r.ID, Name: r.Name, State: string(r.State), Command: r.Command,
 		Exit: r.Exit, Signal: r.Signal, Session: r.Session,
 		Written: r.Written, Retained: r.Retained,
 		StartedAt: r.StartedAt, EndedAt: r.EndedAt, OutputErr: r.OutputErr,
+		Patterns: pats,
 	}
 }
 
 // read returns output by cursor, or the last N lines.
-func (d *Daemon) read(p ReadParams) (ReadResult, error) {
+func (d *Daemon) read(_ context.Context, p ReadParams) (ReadResult, error) {
 	if p.Since != nil && p.Tail != nil {
 		return ReadResult{}, fmt.Errorf("daemon: task_read takes since or tail, not both")
 	}
@@ -406,7 +548,7 @@ func rewind(next, cursor int64, pending int, live bool) int64 {
 }
 
 // search runs a regular expression over the retained log.
-func (d *Daemon) search(p SearchParams) (SearchResult, error) {
+func (d *Daemon) search(_ context.Context, p SearchParams) (SearchResult, error) {
 	re, err := regexp.Compile(p.Regex)
 	if err != nil {
 		return SearchResult{}, fmt.Errorf("daemon: task_search regex: %w", err)

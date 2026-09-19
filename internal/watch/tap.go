@@ -1,0 +1,365 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package watch
+
+import (
+	"bytes"
+	"io"
+	"regexp"
+	"sync"
+	"time"
+
+	"github.com/rcarback/taskd/internal/ansi"
+	"github.com/rcarback/taskd/internal/clock"
+)
+
+// Event reports one fired condition.
+type Event struct {
+	// TaskID is filled in by Wait, which knows which task the tap belongs
+	// to. A Tap serves one task and does not carry its id.
+	TaskID string `json:"id"`
+
+	Kind Kind `json:"fired"`
+
+	// Name is the caller's label for a KindMatch condition.
+	Name string `json:"name,omitempty"`
+
+	// Line is the matching line for KindMatch, already stripped of escape
+	// sequences.
+	Line string `json:"line,omitempty"`
+
+	// Groups holds the capture groups of a KindMatch hit, excluding the
+	// whole match. It is never nil: a nil slice marshals to JSON null, and
+	// a client iterating it would have to test for that.
+	Groups []string `json:"groups,omitempty"`
+
+	// Count is the line total for KindLines.
+	Count int64 `json:"count,omitempty"`
+
+	// Seconds is the window that elapsed for KindIdle and KindElapsed.
+	Seconds int `json:"seconds,omitempty"`
+}
+
+// Tap is the sink for one task's output. It writes every byte through to the
+// underlying store unchanged, and observes a stripped copy so that pattern
+// and line conditions can fire.
+//
+// Writes arrive from one goroutine, the supervisor's output copier, but
+// waiters register and cancel from connection goroutines. Everything below
+// mu is therefore guarded, including the sends to a waiter's channel: each
+// channel is buffered for the single event it will ever carry and is closed
+// in the same step, so no send under the lock can block. See matchLine.
+type Tap struct {
+	sink io.Writer
+	clk  clock.Clock
+
+	mu sync.Mutex
+	// pending holds trailing bytes that begin an escape sequence this
+	// chunk does not finish. ansi.Strip reports their length and excludes
+	// them from clean, so they must be carried into the next Write or the
+	// sequence would be matched as literal text.
+	pending []byte
+	// partial holds the bytes after the last newline: a line is not a line
+	// until it ends, and a pattern may straddle a chunk boundary.
+	partial   []byte
+	lines     int64
+	lastWrite time.Time
+
+	matchers []*matcher
+	counters []*counter
+
+	patterns []*CompiledPattern
+	killed   chan Event
+	killDone bool
+}
+
+type matcher struct {
+	name string
+	re   *regexp.Regexp
+	ch   chan Event
+	done bool
+}
+
+type counter struct {
+	target int64
+	ch     chan Event
+	done   bool
+}
+
+// NewTap returns a Tap that writes through to sink and evaluates pats
+// against every line it observes.
+//
+// A nil or empty pats is normal: most tasks run without start-time
+// patterns, and Stats then reports an empty slice.
+func NewTap(sink io.Writer, clk clock.Clock, pats []*CompiledPattern) *Tap {
+	return &Tap{
+		sink: sink, clk: clk, lastWrite: clk.Now(),
+		patterns: pats,
+		killed:   make(chan Event, 1),
+	}
+}
+
+// Write sends p to the sink unchanged, then observes it.
+//
+// A sink error is returned without observing the bytes: they did not reach
+// the log, so counting them would make the tap's line total disagree with
+// what a later read can actually see.
+func (t *Tap) Write(p []byte) (int, error) {
+	if err := t.writeThrough(p); err != nil {
+		return 0, err
+	}
+	t.observe(p)
+	return len(p), nil
+}
+
+func (t *Tap) writeThrough(p []byte) error {
+	n, err := t.sink.Write(p)
+	if err != nil {
+		return err
+	}
+	if n != len(p) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+// observe strips p, splits it into complete lines, and fires any waiter the
+// new lines satisfy.
+func (t *Tap) observe(p []byte) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.lastWrite = t.clk.Now()
+
+	buf := make([]byte, 0, len(t.pending)+len(p))
+	buf = append(append(buf, t.pending...), p...)
+	clean, pendingLen := ansi.Strip(buf)
+	t.pending = append([]byte(nil), buf[len(buf)-pendingLen:]...)
+
+	t.partial = append(t.partial, clean...)
+
+	for {
+		i := bytes.IndexByte(t.partial, '\n')
+		if i < 0 {
+			break
+		}
+		// A PTY task writes CRLF, so the byte before the newline this just
+		// found is a trailing '\r' that belongs to the line ending, not the
+		// line. Strip every trailing '\r', not just one: ONLCR only adds the
+		// '\r' before NL, but a task that already writes its own "\r\n"
+		// arrives here as "\r\r\n", and TrimSuffix would leave one behind.
+		// TrimRight only ever touches the end of the slice, so an interior
+		// '\r' — real output, such as a progress bar's carriage return — is
+		// untouched. Left in, a trailing '\r' would reach every pattern,
+		// matcher, and counter, making a trailing-anchored regex never match
+		// and every reported line end in a character its caller did not
+		// write.
+		line := string(bytes.TrimRight(t.partial[:i], "\r"))
+		t.partial = t.partial[i+1:]
+		t.lines++
+		t.applyPatterns(line)
+		t.matchLine(line)
+		t.countLine()
+	}
+}
+
+// matchLine tests every live matcher against line and drops any that fires.
+// The caller holds mu.
+//
+// Sending under the lock is safe and deliberate: every waiter channel is
+// buffered for exactly the one event it will ever carry, and the waiter is
+// marked done and closed in the same step, so no send here can block. A
+// later change that unbuffers these channels would deadlock, which is why
+// the buffering is stated rather than assumed.
+//
+// t.matchers is rebuilt in place, keeping only the waiters that did not
+// fire: mutating the slice while ranging over it would skip the entry right
+// after a removed one, so the survivors are collected in a single pass
+// instead of calling dropMatcher mid-range.
+func (t *Tap) matchLine(line string) {
+	live := t.matchers[:0]
+	for _, m := range t.matchers {
+		if !m.done {
+			if groups := m.re.FindStringSubmatch(line); groups != nil {
+				m.done = true
+				m.ch <- Event{
+					Kind:   KindMatch,
+					Name:   m.name,
+					Line:   line,
+					Groups: append([]string{}, groups[1:]...),
+				}
+				close(m.ch)
+			}
+		}
+		if !m.done {
+			live = append(live, m)
+		}
+	}
+	t.matchers = live
+}
+
+// countLine fires every counter the new line total reaches and drops it.
+// The caller holds mu. See matchLine on why sending under the lock cannot
+// block, and on why the slice is rebuilt in one pass rather than mutated
+// mid-range.
+func (t *Tap) countLine() {
+	live := t.counters[:0]
+	for _, c := range t.counters {
+		if !c.done && t.lines >= c.target {
+			c.done = true
+			c.ch <- Event{Kind: KindLines, Count: t.lines}
+			close(c.ch)
+		}
+		if !c.done {
+			live = append(live, c)
+		}
+	}
+	t.counters = live
+}
+
+// applyPatterns records every start-time pattern that line matches, and
+// reports the first kill. The caller holds mu.
+func (t *Tap) applyPatterns(line string) {
+	for _, p := range t.patterns {
+		groups := p.re.FindStringSubmatch(line)
+		if groups == nil {
+			continue
+		}
+		p.count++
+		p.last = line
+		p.groups = append([]string{}, groups[1:]...)
+		p.lastAt = t.lastWrite
+		p.matched = true
+
+		// A kill pattern counts like any other, so status still explains
+		// what ended the task, but it reports only its first hit: the
+		// channel holds one event and the task is ending regardless.
+		if p.Action == ActionKill && !t.killDone {
+			t.killDone = true
+			t.killed <- Event{Kind: KindMatch, Name: p.Name, Line: line, Groups: p.groups}
+			close(t.killed)
+		}
+	}
+}
+
+// OnMatch registers a waiter for the first line matching re.
+//
+// The returned channel carries at most one event and is then closed, so a
+// caller may select on it without tracking whether it already fired. The
+// cancel function unregisters the waiter and closes the channel; calling it
+// after the waiter fired is safe and does nothing.
+func (t *Tap) OnMatch(name string, re *regexp.Regexp) (<-chan Event, func()) {
+	m := &matcher{name: name, re: re, ch: make(chan Event, 1)}
+
+	t.mu.Lock()
+	t.matchers = append(t.matchers, m)
+	t.mu.Unlock()
+
+	return m.ch, func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if m.done {
+			return
+		}
+		m.done = true
+		close(m.ch)
+		t.dropMatcher(m)
+	}
+}
+
+// OnLines registers a waiter for the moment the task's line total reaches n.
+func (t *Tap) OnLines(n int64) (<-chan Event, func()) {
+	c := &counter{target: n, ch: make(chan Event, 1)}
+
+	t.mu.Lock()
+	already := t.lines >= n
+	if already {
+		// The threshold is already behind us. Fire at once rather than
+		// wait for a line that may never come.
+		c.done = true
+		c.ch <- Event{Kind: KindLines, Count: t.lines}
+		close(c.ch)
+	} else {
+		t.counters = append(t.counters, c)
+	}
+	t.mu.Unlock()
+
+	return c.ch, func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if c.done {
+			return
+		}
+		c.done = true
+		close(c.ch)
+		t.dropCounter(c)
+	}
+}
+
+// dropMatcher and dropCounter remove a waiter that is cancelled before it
+// fires. A fired waiter removes itself in matchLine/countLine, so these
+// exist for the cancel path alone: without them, a caller that cancels
+// instead of waiting for a match would leak the entry for the life of the
+// Tap. The caller holds mu.
+func (t *Tap) dropMatcher(m *matcher) {
+	for i, cur := range t.matchers {
+		if cur == m {
+			t.matchers = append(t.matchers[:i], t.matchers[i+1:]...)
+			return
+		}
+	}
+}
+
+func (t *Tap) dropCounter(c *counter) {
+	for i, cur := range t.counters {
+		if cur == c {
+			t.counters = append(t.counters[:i], t.counters[i+1:]...)
+			return
+		}
+	}
+}
+
+// Killed reports the first kill pattern to match. The channel closes right
+// after that one event.
+//
+// A Tap has no notion of the task ending, so nothing closes this channel if
+// no kill pattern ever matches: a caller must select on it alongside the
+// task's own completion signal, not range over it or block on a receive from
+// it alone, or a task with no kill pattern would hang the caller forever.
+func (t *Tap) Killed() <-chan Event { return t.killed }
+
+// Stats reports every pattern's counter and last hit.
+//
+// The result is never nil, and neither is any Groups field: a nil slice
+// marshals to JSON null, which a client iterating it would have to test for.
+func (t *Tap) Stats() []PatternState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	out := make([]PatternState, 0, len(t.patterns))
+	for _, p := range t.patterns {
+		s := PatternState{Name: p.Name, Count: p.count, Groups: append([]string{}, p.groups...)}
+		if p.matched {
+			s.LastLine = p.last
+			s.LastAt = p.lastAt
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// Lines reports how many complete lines the task has written.
+func (t *Tap) Lines() int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lines
+}
+
+// LastWrite reports when output last arrived. Before the first write it
+// reports the tap's construction time, so an idle window measured against it
+// starts when the task started rather than at the zero time.
+func (t *Tap) LastWrite() time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastWrite
+}
