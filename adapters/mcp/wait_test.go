@@ -4,6 +4,7 @@ package mcpadapter_test
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -121,6 +122,44 @@ func TestWaitUnderClaudeCodeEmitsTheExactCommandForTwoIDsAndTwoConditions(t *tes
 		"Do not call task_wait again for these ids. " + notificationBoundary
 	if out.Instruction != want {
 		t.Errorf("instruction =\n%q\nwant\n%q", out.Instruction, want)
+	}
+}
+
+// TestWaitUnderClaudeCodeQuotesARootContainingASingleQuote pins
+// shellQuoteSingle's inner escaping. A root is operator-supplied rather
+// than caller-supplied, but a path may still legitimately contain a single
+// quote, and no test before this one supplied one: removing
+// shellQuoteSingle outright was caught, but removing only its inner escape
+// and leaving the surrounding quotes in place was not.
+//
+// The expected argument is the standard POSIX escape for a single quote
+// inside a single-quoted string: close the quote, emit an escaped quote,
+// reopen the quote. Computed here rather than by calling the unexported
+// shellQuoteSingle directly, since this test lives in mcpadapter_test and
+// the point is to pin the escaped bytes the agent actually receives.
+func TestWaitUnderClaudeCodeQuotesARootContainingASingleQuote(t *testing.T) {
+	root := filepath.Join(shortRoot(t), "it's")
+	cs := newSessionOnRoot(t, root, mcpadapter.HarnessClaudeCode)
+	id := startTask(t, cs, map[string]any{"command": "cat"})
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "task_wait",
+		Arguments: map[string]any{
+			"ids":     []any{id},
+			"deliver": "notify",
+		},
+	})
+	if err != nil {
+		t.Fatalf("calling task_wait: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("task_wait reported an error: %v", res.Content)
+	}
+
+	out := decodeStructured[mcpadapter.WaitOutput](t, res)
+	wantArg := "--root '" + strings.ReplaceAll(root, "'", `'\''`) + "'"
+	if !strings.Contains(out.Instruction, wantArg) {
+		t.Errorf("instruction = %q, want it to contain %q", out.Instruction, wantArg)
 	}
 }
 
