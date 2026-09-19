@@ -6,6 +6,7 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -146,6 +147,93 @@ func TestSignalGraceSReachesTheDaemon(t *testing.T) {
 	got := waitForExit(t, cs, id)
 	if got.State != "killed" {
 		t.Errorf("State = %q, want %q: grace_s: 0 should have insisted almost at once", got.State, "killed")
+	}
+}
+
+// TestSignalFieldReachesTheDaemon pins task_signal's signal field itself,
+// distinct from grace_s: SignalResult.Signal echoes back the syscall the
+// daemon actually chose, so a KILL request that reaches the daemon reports
+// KILL, and a dropped field would default to TERM regardless of what the
+// caller asked for. Minor 16's fix advertised that signal admits KILL
+// directly; this is what proves the advertised capability works.
+func TestSignalFieldReachesTheDaemon(t *testing.T) {
+	cs := newSession(t)
+
+	id := startTask(t, cs, map[string]any{"command": "cat"})
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "task_signal",
+		Arguments: map[string]any{"id": id, "signal": "KILL"},
+	})
+	if err != nil {
+		t.Fatalf("calling task_signal: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("task_signal reported an error: %v", res.Content)
+	}
+
+	got := decodeStructured[daemon.SignalResult](t, res)
+	want := syscall.SIGKILL.String()
+	if got.Signal != want {
+		t.Errorf("Signal = %q, want %q: signal did not reach the daemon", got.Signal, want)
+	}
+}
+
+// TestStatusIDsReachesTheDaemon pins task_status's ids field, distinct from
+// listing everything: with two tasks in the root, a call naming only one id
+// must return exactly that one, not both. A dropped ids field would fall
+// back to task_status's own "no ids means list everything" behavior.
+func TestStatusIDsReachesTheDaemon(t *testing.T) {
+	cs := newSession(t)
+
+	id1 := startTask(t, cs, map[string]any{"command": "cat"})
+	startTask(t, cs, map[string]any{"command": "cat"})
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "task_status",
+		Arguments: map[string]any{"ids": []any{id1}},
+	})
+	if err != nil {
+		t.Fatalf("calling task_status: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("task_status reported an error: %v", res.Content)
+	}
+
+	out := decodeStructured[daemon.StatusResult](t, res)
+	if len(out.Tasks) != 1 {
+		t.Fatalf("task_status returned %d tasks, want 1: ids did not reach the daemon", len(out.Tasks))
+	}
+	if out.Tasks[0].ID != id1 {
+		t.Errorf("Tasks[0].ID = %q, want %q", out.Tasks[0].ID, id1)
+	}
+}
+
+// TestStartOnOutputCapReachesTheDaemon pins task_start's on_output_cap
+// field. The daemon rejects any value other than "rotate", the only cap
+// behavior implemented, naming the caller's own value in the error; a
+// dropped field would default to "rotate" regardless of what was sent and
+// the call would succeed instead.
+func TestStartOnOutputCapReachesTheDaemon(t *testing.T) {
+	cs := newSession(t)
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "task_start",
+		Arguments: map[string]any{"command": "true", "on_output_cap": "bogus-cap-3f8a"},
+	})
+	if err != nil {
+		t.Fatalf("calling task_start: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("task_start accepted an on_output_cap value the daemon does not implement")
+	}
+
+	text, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content[0] is %T, want *mcp.TextContent", res.Content[0])
+	}
+	if !strings.Contains(text.Text, "bogus-cap-3f8a") {
+		t.Errorf("message = %q, want it to name the on_output_cap value", text.Text)
 	}
 }
 
