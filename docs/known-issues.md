@@ -71,8 +71,11 @@ this case. This belongs with the wake adapters of the next plan.
 
 ## `deliver: "notify"` degrades to a long poll
 
-No notification delivery path exists yet, so `task_wait` blocks under every
-`deliver` value and returns a warning saying so.
+Under the generic and Codex harnesses, no notification delivery path
+exists, so `task_wait` blocks regardless of `deliver` and returns a warning
+saying so. Under Claude Code, `deliver: "notify"` instead returns an
+instruction naming a background `taskd wait` command, and the call blocks
+only when the caller sets `deliver` to `block` or omits it.
 
 ## The long-poll warning does not reach standard error or name the harness
 
@@ -81,9 +84,42 @@ error for the operator, and names the harness in the text, `harness: codex`.
 Neither happens. The warning reaches only the tool result that answers the
 call, and it never mentions `StartParams.Harness`.
 
+## `task_wait`'s `until` cannot express a match condition
+
+The MCP adapter's `task_wait` takes `until` as the comma-separated string
+`taskd wait --until` accepts, not the object form `watch.Condition` carries
+over the socket. `watch.ParseUntil` rejects `match:REGEX` on that string
+deliberately, because a regular expression may contain a comma and this
+spelling splits on commas. Waking on matched output is unavailable through
+`task_wait`, even though the daemon supports it through the socket API's
+object form.
+
 ## `StartParams.Harness` is recorded and never read
 
 `task_start` accepts `harness` and the daemon stores it on the record. No
 verb reads it back. The design's long-poll warning was meant to name the
 harness in its text; until that wiring exists, the field sits in every
 record with nothing consuming it.
+
+## `task_wait`'s notify path cannot see a task that failed to launch
+
+Under Claude Code with `deliver: "notify"`, `task_wait` resolves the
+caller's keys through `task_status` before it builds the background
+instruction. `task_status` reports state for any entry the registry holds,
+live tap or not, so it accepts a task whose record is in the `failed`
+state — the outcome of a `task_start` whose command does not exist.
+`task_wait` itself refuses the same entry: a nil tap means nothing can be
+watched, so the blocking path returns
+`task "NAME" never started; read task_status instead`.
+
+The notify path cannot see that distinction. It resolves the failed task's
+key to its id and returns a successful result carrying an instruction. The
+background `taskd wait` command then hits the same nil-tap rejection the
+instant it reaches the daemon and exits at once, with nothing in the exit
+itself to explain why. The harness reports the exit as a wake.
+
+The blocking path reports this case correctly today. Closing the gap on
+the notify path means teaching `resolveIDs` about tap state, which couples
+the adapter to daemon internals it has otherwise stayed clear of, for one
+narrow case: an agent that calls `task_start` and `task_wait` in sequence
+without reading the first result.
