@@ -239,6 +239,42 @@ func TestWaitUnderClaudeCodeResolvesANameToItsID(t *testing.T) {
 	}
 }
 
+// TestWaitUnderClaudeCodeRejectsEmptyIDs pins the len(in.IDs) == 0 guard
+// added alongside resolveIDs. Without it, an ids: [] call falls through to
+// resolveIDs, which calls task_status with an empty ids list — task_status's
+// own "no ids means list everything" behavior — and the emitted instruction
+// would wait on every task in the root instead of rejecting the call.
+func TestWaitUnderClaudeCodeRejectsEmptyIDs(t *testing.T) {
+	cs := newSessionFor(t, mcpadapter.HarnessClaudeCode)
+
+	// Two unrelated tasks: if the guard is missing, resolveIDs's
+	// task_status call lists both, and the emitted instruction names them.
+	startTask(t, cs, map[string]any{"command": "cat"})
+	startTask(t, cs, map[string]any{"command": "cat"})
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "task_wait",
+		Arguments: map[string]any{
+			"ids":     []any{},
+			"deliver": "notify",
+		},
+	})
+	if err != nil {
+		t.Fatalf("calling task_wait: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("task_wait accepted an empty ids list")
+	}
+
+	text, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content[0] is %T, want *mcp.TextContent", res.Content[0])
+	}
+	if !strings.Contains(text.Text, "at least one id") {
+		t.Errorf("message = %q, want it to name the missing ids", text.Text)
+	}
+}
+
 // TestWaitUnderClaudeCodeBlocksWhenDeliverIsOmitted pins the delivery half
 // of the notify guard, "s.harness == HarnessClaudeCode && in.Deliver ==
 // notify". Every other Claude Code test in this file sets deliver to
