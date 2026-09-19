@@ -200,6 +200,40 @@ func TestWaitUnderClaudeCodeResolvesANameToItsID(t *testing.T) {
 	}
 }
 
+// TestWaitUnderClaudeCodeBlocksWhenDeliverIsOmitted pins the delivery half
+// of the notify guard, "s.harness == HarnessClaudeCode && in.Deliver ==
+// notify". Every other Claude Code test in this file sets deliver to
+// "notify", so none of them can tell the guard's two clauses apart from a
+// guard on the harness alone. Dropping the delivery clause would make this
+// call, which omits deliver entirely, return an instruction instead of
+// blocking, and this is the only test that would notice.
+func TestWaitUnderClaudeCodeBlocksWhenDeliverIsOmitted(t *testing.T) {
+	cs := newSessionFor(t, mcpadapter.HarnessClaudeCode)
+
+	id := startTask(t, cs, map[string]any{"command": "true"})
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "task_wait",
+		Arguments: map[string]any{
+			"ids": []any{id},
+		},
+	})
+	if err != nil {
+		t.Fatalf("calling task_wait: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("task_wait reported an error: %v", res.Content)
+	}
+
+	out := decodeStructured[mcpadapter.WaitOutput](t, res)
+	if out.Instruction != "" {
+		t.Fatalf("Instruction = %q, want empty: deliver was omitted, so the call should block", out.Instruction)
+	}
+	if out.Result == nil {
+		t.Fatal("Result is nil, want the daemon's answer from a blocked call")
+	}
+}
+
 func TestWaitUnderCodexDoesNotReturnAnInstruction(t *testing.T) {
 	cs := newSessionFor(t, mcpadapter.HarnessCodex)
 
