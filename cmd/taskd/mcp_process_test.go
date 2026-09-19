@@ -85,6 +85,13 @@ func mcpDecodeStructured[T any](t *testing.T, res *mcp.CallToolResult) T {
 // pins. A mutation that drops the flag on the floor makes this test fail
 // while leaving every adapter-package test green, because those tests
 // choose their harness directly and never go through this command at all.
+//
+// runMCP passes two values into mcpadapter.New: root and harness. Both are
+// pinned here, not just harness: the emitted instruction names the root the
+// server was actually given, so a mutation that points the adapter at a
+// different root — one that leaves every other test in the repository
+// green, because nothing else asserts which root a real "taskd mcp"
+// process used — fails this test too.
 func TestMCPHarnessFlagReachesTheAdapter(t *testing.T) {
 	bin := buildTaskdBinary(t)
 	root := mcpTestRoot(t)
@@ -137,6 +144,10 @@ func TestMCPHarnessFlagReachesTheAdapter(t *testing.T) {
 	}
 	if !strings.Contains(out.Instruction, "taskd wait") {
 		t.Errorf("instruction = %q, want it to name the taskd wait command", out.Instruction)
+	}
+	if !strings.Contains(out.Instruction, "--root '"+root+"'") {
+		t.Errorf("instruction = %q, want it to name the --root flag's own root %q: "+
+			"the --root flag did not reach the adapter", out.Instruction, root)
 	}
 	if !strings.Contains(out.Instruction, "--id "+id) {
 		t.Errorf("instruction = %q, want it to name the started task's id %q", out.Instruction, id)
