@@ -23,7 +23,7 @@ import (
 type WaitInput struct {
 	IDs     []string `json:"ids"               jsonschema:"task ids to watch; the call wakes on the first to fire"`
 	Until   string   `json:"until,omitempty"   jsonschema:"comma-separated conditions, for example exit,idle:300; defaults to exit,idle:300"`
-	Deliver string   `json:"deliver,omitempty" jsonschema:"notify asks for a non-blocking wake where the harness supports one; block always blocks"`
+	Deliver string   `json:"deliver,omitempty" jsonschema:"notify asks for a non-blocking wake where the harness supports one, returning instruction instead of blocking; block always blocks; defaults to block"`
 }
 
 // idPattern matches every id taskdir.New's newID produces: a base-36
@@ -46,10 +46,10 @@ var idPattern = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 type WaitOutput struct {
 	// Instruction names a shell command to run in the background. The
 	// harness notifies the agent when it exits.
-	Instruction string `json:"instruction,omitempty"`
+	Instruction string `json:"instruction,omitempty" jsonschema:"a shell command to run in the background instead of blocking, set only when deliver asked for notify and the harness supports it; run it, and the harness notifies you when it exits"`
 
 	// Result is the wait's outcome when the call blocked.
-	Result *daemon.WaitResult `json:"result,omitempty"`
+	Result *daemon.WaitResult `json:"result,omitempty" jsonschema:"the daemon's answer, set only when the call blocked"`
 }
 
 // backgroundInstruction is what an agent under Claude Code receives instead

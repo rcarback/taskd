@@ -14,8 +14,8 @@ import (
 // ReadInput is task_read's input. Since and Tail are mutually exclusive.
 type ReadInput struct {
 	ID       string `json:"id"                  jsonschema:"the task id"`
-	Since    *int64 `json:"since,omitempty"     jsonschema:"cursor from a previous read; returns only newer output"`
-	Tail     *int   `json:"tail,omitempty"      jsonschema:"return the last N lines instead of reading from a cursor"`
+	Since    *int64 `json:"since,omitempty"     jsonschema:"cursor from a previous read; returns only newer output; mutually exclusive with tail"`
+	Tail     *int   `json:"tail,omitempty"      jsonschema:"return the last N lines instead of reading from a cursor; mutually exclusive with since"`
 	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"cap the bytes this call returns"`
 }
 
@@ -45,8 +45,10 @@ func (s *server) addRead(srv *mcp.Server) {
 		Name: "task_read",
 		Description: "Read a task's output by cursor, or the last N lines. " +
 			"Pass since with the cursor from your previous read to get only " +
-			"new output. Check truncated_bytes on every response: a " +
-			"truncated log is how you conclude that a failed build " +
+			"new output. Pass tail for a post-mortem snapshot instead. " +
+			"since and tail are mutually exclusive; the daemon rejects a " +
+			"call that sets both. Check truncated_bytes on every response: " +
+			"a truncated log is how you conclude that a failed build " +
 			"succeeded.",
 	}, func(
 		_ context.Context, _ *mcp.CallToolRequest, in ReadInput,
@@ -83,8 +85,9 @@ func (s *server) addSearch(srv *mcp.Server) {
 
 func (s *server) addSignal(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "task_signal",
-		Description: "Send TERM to a task, then KILL after a grace period.",
+		Name: "task_signal",
+		Description: "Send TERM to a task, then KILL after a grace period. " +
+			"Pass signal: \"KILL\" to send KILL directly, with no grace period.",
 	}, func(
 		_ context.Context, _ *mcp.CallToolRequest, in SignalInput,
 	) (*mcp.CallToolResult, daemon.SignalResult, error) {
