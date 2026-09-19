@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	mcpadapter "github.com/rcarback/taskd/adapters/mcp"
 	"github.com/rcarback/taskd/internal/client"
 	"github.com/rcarback/taskd/internal/clock"
 	"github.com/rcarback/taskd/internal/daemon"
@@ -45,6 +46,8 @@ func dispatch(args []string, stdout io.Writer) int {
 		return run(args[1:], stdout)
 	case "wait":
 		return wait(args[1:], stdout)
+	case "mcp":
+		return runMCP(args[1:], stdout)
 	case "serve":
 		return serve(args[1:], stdout)
 	default:
@@ -55,6 +58,7 @@ func dispatch(args []string, stdout io.Writer) int {
 
 const usage = "usage: taskd run [flags] -- COMMAND [ARGS...]\n" +
 	"       taskd wait --id ID [--id ID...] [--until exit,idle:300]\n" +
+	"       taskd mcp [--root DIR] [--harness NAME]\n" +
 	"       taskd serve [--root DIR]"
 
 // serve runs the daemon in the foreground until a signal ends it.
@@ -78,6 +82,39 @@ func serve(args []string, stdout io.Writer) int {
 	defer stop()
 
 	if err := d.Serve(ctx); err != nil {
+		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// runMCP serves the tools over standard input and output.
+//
+// Nothing else may write to stdout while this runs: the transport is
+// newline-delimited JSON on that stream, and a stray line corrupts it. Errors
+// go to the caller's stdout only after Run returns.
+func runMCP(args []string, stdout io.Writer) int {
+	fs := flag.NewFlagSet("taskd mcp", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	root := fs.String("root", paths.Root(), "directory that holds task records")
+	harness := fs.String("harness", string(mcpadapter.HarnessGeneric),
+		"agent runtime: generic, claude-code, or codex")
+	if err := fs.Parse(args); err != nil {
+		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
+		return 2
+	}
+
+	h, err := mcpadapter.ParseHarness(*harness)
+	if err != nil {
+		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
+		return 2
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(),
+		syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := mcpadapter.Run(ctx, *root, h); err != nil {
 		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
 		return 1
 	}

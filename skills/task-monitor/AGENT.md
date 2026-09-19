@@ -21,28 +21,31 @@ context. A `kill -0` check reads a recycled process identifier and cannot
 report an exit code.
 
 **Start the job under supervision.** Call `task_start` with a `name` you will
-recognize later, and patterns for anything that should wake you or abort the
-run.
+recognize later, and patterns for anything that should be recorded or abort
+the run.
 
-**Wake on an event.** Call `task_wait` with `deliver: "notify"`. Choose the
-condition that matches what you are waiting for:
+**Call `task_wait` and expect it to block.** No delivery adapter exists for
+Codex, Pi, or another generic host, so `task_wait` blocks until the
+condition fires no matter what you pass as `deliver`. The response carries
+a `LONG-POLL` warning that states how long the call held you. You cannot
+answer questions or compact while blocked. Choose the condition that
+matches what you are waiting for:
 
 - `exit` — the task ends. The normal case.
 - `idle` — nothing writes for N seconds. Detects a hang, which elapsed time
   cannot.
 - `elapsed` — N seconds pass and the task keeps running. This replaces
   `sleep`.
-- `match` — output matches a pattern.
 - `lines` — N new lines appear.
+
+`task_wait` has no condition for matched output. A pattern with
+`on_match: "record"` still counts a match and keeps the last line, read
+through `task_status`. Wake on `elapsed` or `idle` and check it then.
 
 Wake conditions never kill a task. Pass several ids to one call to watch
 several jobs at once.
 
-**Then go free.** Update your task list. Compact your context if you are above
-the threshold given in the response. Do other work, or hand back to the user.
-Do not poll.
-
-**On the wake, verify before reporting.** A fired condition is not a successful one. Read
+**Verify before reporting.** A fired condition is not a successful one. Read
 the state: `exited` (check the exit code), `signaled`, `killed` (a cap or your own
 signal), `failed` (never started), or `lost` (the daemon died, so the log
 survives and the exit code does not).
@@ -52,9 +55,6 @@ approval for anything.
 
 **Read output by cursor.** Pass `since` from your previous `task_read` to get
 only new output. Check `truncated_bytes` on every response.
-
-**Block only when you must.** `deliver: "block"` works on every host and
-returns a warning. You cannot answer questions or compact while blocked.
 
 ## Tools
 

@@ -128,6 +128,26 @@ func TestUsageNamesWait(t *testing.T) {
 	}
 }
 
+func TestMCPRejectsAnUnknownHarness(t *testing.T) {
+	var out strings.Builder
+	if got := dispatch([]string{"mcp", "--harness", "emacs"}, &out); got != 2 {
+		t.Errorf("exit code = %d, want 2", got)
+	}
+	if !strings.Contains(out.String(), "unknown harness") {
+		t.Errorf("output = %q, want it to name the unknown harness", out.String())
+	}
+}
+
+func TestUsageNamesTheMCPSubcommand(t *testing.T) {
+	var out strings.Builder
+	if got := dispatch(nil, &out); got != 2 {
+		t.Errorf("exit code = %d, want 2", got)
+	}
+	if !strings.Contains(out.String(), "taskd mcp") {
+		t.Errorf("usage = %q, want it to name the mcp subcommand", out.String())
+	}
+}
+
 func TestExitCodeCoversEveryTerminalState(t *testing.T) {
 	cases := []struct {
 		name string
