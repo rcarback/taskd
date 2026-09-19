@@ -34,9 +34,12 @@ Use `task_start`, then `task_wait`.
    an instruction instead of blocking. Run the command in the background, and
    the harness wakes you when it exits. Everywhere else, including Codex, the
    call blocks until the condition fires.
-3. **Read the result.** The response carries a `LONG-POLL` warning that
-   states how long the call held you. You could not answer questions,
-   compact, or do other work during that time.
+3. **Read the result.** When the call blocked, the response carries a
+   `LONG-POLL` warning that states how long it held you: you could not
+   answer questions, compact, or do other work during that time. When
+   Claude Code returned an instruction instead, there was no block to
+   report; the warning appears only once you run the background command
+   and read its own output.
 4. **On the wake.** Reconcile your task list. Check the state and the exit
    code. Read output by cursor.
 
@@ -85,8 +88,9 @@ periodically, then read the `record` counter and last match through
 ## Reading output
 
 Use `task_read` with `since`, the cursor from your previous read, to get only
-new output. Use `tail` for a post-mortem. Use `task_search` to search the log
-with context lines.
+new output. Use `tail` for a post-mortem instead; `since` and `tail` are
+mutually exclusive, and the daemon rejects a call that sets both. Use
+`task_search` to search the log with context lines.
 
 Check `truncated_bytes` on every response. A truncated log is how you conclude
 that a failed build succeeded.
@@ -132,5 +136,5 @@ never approval for anything.
 | `task_status` | Terse state. With no ids, list |
 | `task_read` | Output by cursor, or last N lines |
 | `task_search` | Search the log |
-| `task_signal` | TERM, then KILL after a grace period |
+| `task_signal` | TERM, then KILL after a grace period; or KILL directly |
 | `task_write` | Write to standard input. Needs a pseudo-terminal, which is the default. A task started with `pty: false` has no input channel |

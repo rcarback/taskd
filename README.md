@@ -1,7 +1,7 @@
 # taskd
 
-Supervised long-running tasks for coding agents. Wake on exit, silence, or a
-matched pattern instead of polling with `sleep`.
+Supervised long-running tasks for coding agents. Wake on exit or silence
+instead of polling with `sleep`.
 
 Status: **daemon and MCP adapter implemented.** The daemon, its seven verbs,
 the wake engine, and the MCP adapter exist, along with the `run`, `wait`, and
@@ -33,16 +33,19 @@ when something happens.
 ```jsonc
 task_start { command: "cargo", args: ["build"], name: "87e-v2",
              patterns: [{name: "err", regex: "error:", on_match: "record"}] }
+// -> { id: "8f2c-4k9z", name: "87e-v2" }
 
-task_wait  { ids: ["87e-v2"],
+task_wait  { ids: ["8f2c-4k9z"],
              until: "exit,idle:300",
              deliver: "notify" }
 ```
 
-Under Claude Code, `task_wait` returns at once. The agent stays free until
-the task exits or goes silent for 300 seconds; `task_status` on the same
-task reports whether the `err` pattern matched. See Host support for every
-other harness.
+Under Claude Code, `task_wait` returns at once with an instruction naming a
+`taskd wait` command. Run that command in the background, and the agent
+stays free until it exits: the harness then notifies you that the task
+exited or went silent for 300 seconds. `task_status` on the same task
+reports whether the `err` pattern matched. See Host support for every other
+harness.
 
 Seven tools: `task_start`, `task_wait`, `task_status`, `task_read`,
 `task_search`, `task_signal`, `task_write`.
