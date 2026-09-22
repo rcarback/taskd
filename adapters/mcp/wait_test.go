@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -309,20 +310,39 @@ func TestWaitUnderClaudeCodeBlocksWhenDeliverIsOmitted(t *testing.T) {
 	}
 }
 
-func TestWaitUnderCodexDoesNotReturnAnInstruction(t *testing.T) {
+func TestWaitUnderCodexReturnsAThreadSpecificInstruction(t *testing.T) {
 	cs := newSessionFor(t, mcpadapter.HarnessCodex)
+	id := startTask(t, cs, map[string]any{"command": "cat"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "task_wait", Arguments: map[string]any{
+		"ids": []string{id}, "deliver": "notify", "until": "exit", "thread_id": "11111111-2222-3333-4444-555555555555",
+	}})
+	if err != nil || res.IsError {
+		t.Fatalf("notify: %v, %+v", err, res)
+	}
+	out := decodeStructured[mcpadapter.WaitOutput](t, res)
+	for _, want := range []string{"nohup", "--notify-thread 11111111-2222-3333-4444-555555555555", "--until exit", "not user approval"} {
+		if !strings.Contains(out.Instruction, want) {
+			t.Errorf("instruction lacks %q: %s", want, out.Instruction)
+		}
+	}
+	if out.Result != nil {
+		t.Fatal("notify must not block")
+	}
+}
 
-	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
-		Name: "task_wait",
-		Arguments: map[string]any{
-			"ids":     []any{"no-such-task"},
-			"deliver": "notify",
-		},
-	})
-	// The id does not exist, so the call fails at the daemon. What matters
-	// is that it reached the daemon at all rather than short-circuiting.
-	if err == nil && !res.IsError {
-		t.Fatal("task_wait under codex returned without reaching the daemon")
+func TestCodexNotifyRejectsMissingOrInvalidThread(t *testing.T) {
+	cs := newSessionFor(t, mcpadapter.HarnessCodex)
+	id := startTask(t, cs, map[string]any{"command": "true"})
+	waitForExit(t, cs, id)
+	for _, thread := range []string{"", "latest", "$(touch /tmp/unwanted)"} {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "task_wait", Arguments: map[string]any{
+			"ids": []string{id}, "deliver": "notify", "thread_id": thread,
+		}})
+		if err == nil && !res.IsError {
+			t.Errorf("accepted thread %q", thread)
+		}
 	}
 }
 
