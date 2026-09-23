@@ -55,7 +55,7 @@ Seven tools: `task_start`, `task_wait`, `task_status`, `task_read`,
 - **The daemon is the parent.** Only the parent can read an exit code, the
   signal that ended the process, and resource usage. A watcher that polls a process
   identifier cannot.
-- **Wake conditions never kill.** `elapsed` wakes the agent and leaves the task
+- **Wake conditions never stop tasks.** `elapsed` wakes the agent and leaves the task
   running. Absolute runtime caps default to off, and the output cap rotates
   the log rather than ending the job.
 - **Silence is the safety net.** `idle` detects a hang. Elapsed time does not.
@@ -70,10 +70,12 @@ Seven tools: `task_start`, `task_wait`, `task_status`, `task_read`,
 |------|-----------|--------|
 | Pi | Extension pushes a turn in process | Adapter not built yet, uses long poll |
 | Claude Code | Background waiter, host notifies on exit | Adapter built, skips the long poll |
-| Codex | `codex queue --thread` | Adapter not built yet, uses long poll |
+| Codex | Background waiter calls `codex queue --thread` | Adapter implemented, explicit `thread_id` required |
 
-Long poll works everywhere and always returns a warning, because a blocked
-agent is the problem this tool exists to remove.
+For Codex, pass the current session UUID as `thread_id` with `deliver: "notify"`.
+Run the returned background command once, then continue other work or yield.
+The waiter saves delivery errors in its log and exits nonzero if queueing fails.
+Generic hosts use a blocking wait and receive a warning.
 
 ## Skill
 

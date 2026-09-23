@@ -36,8 +36,8 @@ const (
 	// wait that asks for notify delivery.
 	HarnessClaudeCode Harness = "claude-code"
 
-	// HarnessCodex behaves as HarnessGeneric. Codex delivery is unverified
-	// and this adapter ships none.
+	// HarnessCodex returns a background waiter that queues an event to an
+	// explicitly supplied session UUID.
 	HarnessCodex Harness = "codex"
 )
 

@@ -15,11 +15,13 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	mcpadapter "github.com/rcarback/taskd/adapters/mcp"
 	"github.com/rcarback/taskd/internal/client"
 	"github.com/rcarback/taskd/internal/clock"
 	"github.com/rcarback/taskd/internal/daemon"
+	"github.com/rcarback/taskd/internal/notify"
 	"github.com/rcarback/taskd/internal/output"
 	"github.com/rcarback/taskd/internal/paths"
 	"github.com/rcarback/taskd/internal/proto"
@@ -200,6 +202,7 @@ func wait(args []string, stdout io.Writer) int {
 	fs.Var(&ids, "id", "task id to wait on; repeat for several")
 	until := fs.String("until", "", "conditions, for example exit,idle:300 (default exit,idle:300)")
 	root := fs.String("root", paths.Root(), "directory that holds task records")
+	thread := fs.String("notify-thread", "", "queue the wait result to this Codex thread UUID")
 	if err := fs.Parse(args); err != nil {
 		_, _ = fmt.Fprintf(stdout, "taskd: %v\n%s\n", err, usage)
 		return 2
@@ -207,6 +210,13 @@ func wait(args []string, stdout io.Writer) int {
 	if len(ids) == 0 {
 		_, _ = fmt.Fprintf(stdout, "taskd: wait needs at least one --id\n%s\n", usage)
 		return 2
+	}
+
+	if *thread != "" {
+		if err := notify.ValidateThread(*thread); err != nil {
+			_, _ = fmt.Fprintln(stdout, "taskd:", err)
+			return 2
+		}
 	}
 
 	conds, err := watch.ParseUntil(*until)
@@ -223,18 +233,40 @@ func wait(args []string, stdout io.Writer) int {
 
 	resp, err := client.Call(*root, proto.Request{Verb: proto.VerbWait, Params: params})
 	if err != nil {
-		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
-		return 1
+		return waitFailure(stdout, *thread, err)
 	}
 	if !resp.OK {
-		_, _ = fmt.Fprintf(stdout, "taskd: %s\n", resp.Error)
-		return 1
+		return waitFailure(stdout, *thread, errors.New(resp.Error))
 	}
 
 	// The raw result goes to stdout so the agent reads the same fields the
 	// socket carried, including the long poll warning.
 	_, _ = fmt.Fprintf(stdout, "%s\n", resp.Result)
+	if *thread != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := notify.Codex(ctx, *thread, resp.Result); err != nil {
+			_, _ = fmt.Fprintln(stdout, "taskd:", err)
+			return 1
+		}
+	}
+
 	return 0
+}
+
+// waitFailure wakes the selected session even when the daemon could not produce
+// a result. Without this event a detached waiter could leave the session idle.
+func waitFailure(stdout io.Writer, thread string, failure error) int {
+	_, _ = fmt.Fprintln(stdout, "taskd:", failure)
+	if thread != "" {
+		payload, _ := json.Marshal(map[string]string{"state": "wait_error", "error": failure.Error()})
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := notify.Codex(ctx, thread, payload); err != nil {
+			_, _ = fmt.Fprintln(stdout, "taskd:", err)
+		}
+	}
+	return 1
 }
 
 // reportResult prints the task's terminal state and, when the output sink

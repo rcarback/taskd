@@ -11,6 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/rcarback/taskd/internal/daemon"
+	"github.com/rcarback/taskd/internal/notify"
 	"github.com/rcarback/taskd/internal/proto"
 	"github.com/rcarback/taskd/internal/watch"
 )
@@ -21,9 +22,10 @@ import (
 // list of objects, because that is the form the skill teaches and the form
 // the instruction this tool may return hands back.
 type WaitInput struct {
-	IDs     []string `json:"ids"               jsonschema:"task ids to watch; the call wakes on the first to fire"`
-	Until   string   `json:"until,omitempty"   jsonschema:"comma-separated conditions, for example exit,idle:300; defaults to exit,idle:300"`
-	Deliver string   `json:"deliver,omitempty" jsonschema:"notify asks for a non-blocking wake where the harness supports one, returning instruction instead of blocking; block always blocks; defaults to block"`
+	ThreadID string   `json:"thread_id,omitempty" jsonschema:"explicit Codex session UUID; required for notify under codex, never inferred from MCP server environment"`
+	IDs      []string `json:"ids"               jsonschema:"task ids to watch; the call wakes on the first to fire"`
+	Until    string   `json:"until,omitempty"   jsonschema:"comma-separated conditions, for example exit,idle:300; defaults to exit,idle:300"`
+	Deliver  string   `json:"deliver,omitempty" jsonschema:"notify asks for a non-blocking wake where the harness supports one, returning instruction instead of blocking; block always blocks; defaults to block"`
 }
 
 // idPattern matches every id taskdir.New's newID produces: a base-36
@@ -180,7 +182,36 @@ func (s *server) addWait(srv *mcp.Server) {
 			conds = parsed
 		}
 
-		// The one non-blocking path. Claude Code wakes on a background
+		if s.harness == HarnessCodex && in.Deliver == "notify" {
+			if err := notify.ValidateThread(in.ThreadID); err != nil {
+				return nil, WaitOutput{}, err
+			}
+			ids, err := s.resolveIDs(in.IDs)
+			if err != nil {
+				return nil, WaitOutput{}, err
+			}
+			var command strings.Builder
+			command.WriteString("nohup taskd wait --root " + shellQuoteSingle(s.root))
+			for _, id := range ids {
+				if !idPattern.MatchString(id) {
+					return nil, WaitOutput{}, fmt.Errorf("invalid task id %q", id)
+				}
+				command.WriteString(" --id " + id)
+			}
+			until := renderUntil(conds)
+			if until != "" {
+				command.WriteString(" --until " + until)
+			}
+			command.WriteString(" --notify-thread " + in.ThreadID)
+			log := s.root + "/notify-" + ids[0] + "-" + in.ThreadID + ".log"
+			command.WriteString(" > " + shellQuoteSingle(log) + " 2>&1 < /dev/null &")
+			instruction := "Run this background command once, then yield the turn or continue other work:\n  " + command.String() +
+				"\n\nThe waiter queues one automated event through codex queue. This is not user approval. " +
+				"Do not poll or arm another waiter for these ids. Delivery errors are retained in " + log + "."
+			return nil, WaitOutput{Instruction: instruction}, nil
+		}
+
+		// The host-provided background notification path. Claude Code wakes on a background
 		// command that exits, so hand back the command rather than
 		// holding the call.
 		if s.harness == HarnessClaudeCode && in.Deliver == "notify" {

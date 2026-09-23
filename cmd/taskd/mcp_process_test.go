@@ -153,3 +153,74 @@ func TestMCPHarnessFlagReachesTheAdapter(t *testing.T) {
 		t.Errorf("instruction = %q, want it to name the started task's id %q", out.Instruction, id)
 	}
 }
+
+func TestCodexWaitQueuesTheRealTaskResultAndReportsDeliveryFailure(t *testing.T) {
+	bin := buildTaskdBinary(t)
+	root := mcpTestRoot(t)
+	t.Cleanup(func() { stopMCPTestDaemon(t, root) })
+	ctx := context.Background()
+	transport := &mcp.CommandTransport{Command: exec.Command(bin, "mcp", "--root", root, "--harness", "codex")} //nolint:gosec // binary and arguments come from this test, without shell interpolation
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	cs, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	started, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "task_start", Arguments: map[string]any{"command": "sh", "args": []string{"-c", "exit 7"}}})
+	if err != nil || started.IsError {
+		t.Fatalf("start: %v %+v", err, started)
+	}
+	id := mcpDecodeStructured[daemon.StartResult](t, started).ID
+	thread := "11111111-2222-3333-4444-555555555555"
+	waited, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "task_wait", Arguments: map[string]any{"ids": []string{id}, "until": "exit", "deliver": "notify", "thread_id": thread}})
+	if err != nil || waited.IsError {
+		t.Fatalf("arm: %v %+v", err, waited)
+	}
+	instruction := mcpDecodeStructured[mcpadapter.WaitOutput](t, waited).Instruction
+	if !strings.Contains(instruction, "--notify-thread "+thread) {
+		t.Fatal(instruction)
+	}
+	fake := t.TempDir()
+	received := filepath.Join(fake, "received")
+	t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("NOTIFY_ARGS", received)
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NOTIFY_ARGS\"\n"
+	if err := os.WriteFile(filepath.Join(fake, "codex"), []byte(script), 0o700); err != nil { //nolint:gosec // owner-only executable fixture for the fake CLI
+		t.Fatal(err)
+	}
+	command := func() *exec.Cmd {
+		return exec.Command(bin, "wait", "--root", root, "--id", id, "--until", "exit", "--notify-thread", thread) //nolint:gosec // binary and arguments come from this test, without shell interpolation
+	}
+	output, err := command().CombinedOutput()
+	if err != nil {
+		t.Fatalf("wait: %v %s", err, output)
+	}
+	message, err := os.ReadFile(received) //nolint:gosec // path belongs to this test temporary directory
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"queue\n--thread\n" + thread, "not user approval", `"exit_code":7`, id} {
+		if !strings.Contains(string(message), want) {
+			t.Errorf("missing %s in %s", want, message)
+		}
+	}
+	failed := exec.Command(bin, "wait", "--root", root, "--id", "missing-task", "--until", "exit", "--notify-thread", thread) //nolint:gosec // binary and arguments come from this test, without shell interpolation
+	output, err = failed.CombinedOutput()
+	if err == nil {
+		t.Fatalf("missing task unexpectedly succeeded: %s", output)
+	}
+	message, err = os.ReadFile(received) //nolint:gosec // path belongs to this test temporary directory
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(message), "wait_error") || !strings.Contains(string(message), "missing-task") {
+		t.Fatalf("wait failure was not queued: %s", message)
+	}
+	if err := os.WriteFile(filepath.Join(fake, "codex"), []byte("#!/bin/sh\necho delivery-refused >&2\nexit 9\n"), 0o700); err != nil { //nolint:gosec // owner-only executable fixture for the fake CLI
+		t.Fatal(err)
+	}
+	output, err = command().CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "delivery-refused") {
+		t.Fatalf("delivery failure hidden: %v %s", err, output)
+	}
+}
