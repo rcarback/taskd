@@ -50,12 +50,19 @@ func callVerb(t *testing.T, d *Daemon, verb string, v any) (any, error) {
 }
 
 // waitForState blocks until the entry reaches a terminal state.
+// waitForState waits until the test's own deadline, less a margin for the
+// failure report. A fixed bound failed the 2 MB read tests under -race on a
+// loaded host, where the second one takes about 7 s even when idle.
 func waitForState(t *testing.T, e *Entry) supervisor.State {
 	t.Helper()
+	bound := 10 * time.Second
+	if deadline, ok := t.Deadline(); ok {
+		bound = time.Until(deadline) - 5*time.Second
+	}
 	select {
 	case <-e.Done():
 		return e.Record().State
-	case <-time.After(10 * time.Second):
+	case <-time.After(bound):
 		t.Fatal("task did not reach a terminal state")
 		return ""
 	}
