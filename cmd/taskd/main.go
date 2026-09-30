@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -59,7 +60,7 @@ func dispatch(args []string, stdout io.Writer) int {
 }
 
 const usage = "usage: taskd run [flags] -- COMMAND [ARGS...]\n" +
-	"       taskd wait --id ID [--id ID...] [--until exit,idle:300]\n" +
+	"       taskd wait --id ID [--id ID...] [--until exit,idle:300] [--notify-thread UUID [--detach]]\n" +
 	"       taskd mcp [--root DIR] [--harness NAME]\n" +
 	"       taskd serve [--root DIR]"
 
@@ -203,6 +204,7 @@ func wait(args []string, stdout io.Writer) int {
 	until := fs.String("until", "", "conditions, for example exit,idle:300 (default exit,idle:300)")
 	root := fs.String("root", paths.Root(), "directory that holds task records")
 	thread := fs.String("notify-thread", "", "queue the wait result to this Codex thread UUID")
+	detach := fs.Bool("detach", false, "wait in a new session and return at once; needs --notify-thread")
 	if err := fs.Parse(args); err != nil {
 		_, _ = fmt.Fprintf(stdout, "taskd: %v\n%s\n", err, usage)
 		return 2
@@ -223,6 +225,14 @@ func wait(args []string, stdout io.Writer) int {
 	if err != nil {
 		_, _ = fmt.Fprintf(stdout, "taskd: %v\n", err)
 		return 2
+	}
+
+	if *detach {
+		if *thread == "" {
+			_, _ = fmt.Fprintf(stdout, "taskd: --detach needs --notify-thread\n%s\n", usage)
+			return 2
+		}
+		return detachWait(args, stdout)
 	}
 
 	params, err := json.Marshal(daemon.WaitParams{IDs: ids, Until: conds, Deliver: "block"})
@@ -251,6 +261,40 @@ func wait(args []string, stdout io.Writer) int {
 		}
 	}
 
+	return 0
+}
+
+// detachWait runs this wait again in a new session and returns at once.
+//
+// A waiter started with "nohup ... &" stays in the shell's process group. A
+// harness that ends that group when its command returns kills the waiter
+// before it can deliver. Setsid moves the child out of the group and session.
+// The child inherits stdout and stderr, so its result lands in the same log.
+func detachWait(args []string, stdout io.Writer) int {
+	self, err := os.Executable()
+	if err != nil {
+		_, _ = fmt.Fprintln(stdout, "taskd: find this binary:", err)
+		return 1
+	}
+	child := []string{"wait"}
+	for _, arg := range args {
+		name, _, _ := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		if strings.HasPrefix(arg, "-") && name == "detach" {
+			continue
+		}
+		child = append(child, arg)
+	}
+	cmd := exec.Command(self, child...) //nolint:gosec // self is this binary, and the arguments already passed its own flag parsing
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		_, _ = fmt.Fprintln(stdout, "taskd: start detached waiter:", err)
+		return 1
+	}
+	_, _ = fmt.Fprintf(stdout, "taskd: detached waiter %d\n", cmd.Process.Pid)
+	// The waiter outlives this process, which never reaps it.
+	_ = cmd.Process.Release()
 	return 0
 }
 
