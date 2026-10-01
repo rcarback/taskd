@@ -191,7 +191,7 @@ func (s *server) addWait(srv *mcp.Server) {
 				return nil, WaitOutput{}, err
 			}
 			var command strings.Builder
-			command.WriteString("nohup taskd wait --root " + shellQuoteSingle(s.root))
+			command.WriteString("taskd wait --detach --root " + shellQuoteSingle(s.root))
 			for _, id := range ids {
 				if !idPattern.MatchString(id) {
 					return nil, WaitOutput{}, fmt.Errorf("invalid task id %q", id)
@@ -204,8 +204,9 @@ func (s *server) addWait(srv *mcp.Server) {
 			}
 			command.WriteString(" --notify-thread " + in.ThreadID)
 			log := s.root + "/notify-" + ids[0] + "-" + in.ThreadID + ".log"
-			command.WriteString(" > " + shellQuoteSingle(log) + " 2>&1 < /dev/null &")
-			instruction := "Run this background command once, then yield the turn or continue other work:\n  " + command.String() +
+			command.WriteString(" > " + shellQuoteSingle(log) + " 2>&1 < /dev/null")
+			instruction := "Run this command once. It returns at once and leaves the waiter in its own session. " +
+				"Then yield the turn or continue other work:\n  " + command.String() +
 				"\n\nThe waiter queues one automated event through codex queue. This is not user approval. " +
 				"Do not poll or arm another waiter for these ids. Delivery errors are retained in " + log + "."
 			return nil, WaitOutput{Instruction: instruction}, nil

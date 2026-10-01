@@ -322,10 +322,13 @@ func TestWaitUnderCodexReturnsAThreadSpecificInstruction(t *testing.T) {
 		t.Fatalf("notify: %v, %+v", err, res)
 	}
 	out := decodeStructured[mcpadapter.WaitOutput](t, res)
-	for _, want := range []string{"nohup", "--notify-thread 11111111-2222-3333-4444-555555555555", "--until exit", "not user approval"} {
+	for _, want := range []string{"taskd wait --detach ", "--notify-thread 11111111-2222-3333-4444-555555555555", "--until exit", "not user approval"} {
 		if !strings.Contains(out.Instruction, want) {
 			t.Errorf("instruction lacks %q: %s", want, out.Instruction)
 		}
+	}
+	if strings.Contains(out.Instruction, "nohup") || strings.HasSuffix(strings.TrimSpace(strings.SplitN(out.Instruction, "\n\n", 2)[0]), "&") {
+		t.Errorf("instruction still backgrounds the waiter in the shell's process group: %s", out.Instruction)
 	}
 	if out.Result != nil {
 		t.Fatal("notify must not block")

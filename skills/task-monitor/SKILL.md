@@ -59,8 +59,9 @@ Never guess a thread, use a recent-thread search, or select an ambiguous session
 The server does not infer the session from its own environment.
 If the UUID is unavailable, explain that limitation before choosing another delivery method.
 
-The response supplies a `nohup taskd wait ... --notify-thread UUID` command.
-Run it once. It survives the MCP connection and sends an event through `codex queue --thread`.
+The response supplies a `taskd wait --detach ... --notify-thread UUID` command.
+Run it once in the foreground. It returns at once and leaves the waiter in its own session.
+The waiter survives the shell's cleanup and the MCP connection, and it sends an event through `codex queue --thread`.
 The waiter log records the wait result and any delivery error.
 A failed queue command exits nonzero. The waiter makes no automatic retry because delivery may already have occurred.
 

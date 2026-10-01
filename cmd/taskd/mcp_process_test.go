@@ -5,11 +5,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -222,5 +226,97 @@ func TestCodexWaitQueuesTheRealTaskResultAndReportsDeliveryFailure(t *testing.T)
 	output, err = command().CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "delivery-refused") {
 		t.Fatalf("delivery failure hidden: %v %s", err, output)
+	}
+}
+
+func TestDetachedWaitReturnsAtOnceAndDeliversFromItsOwnSession(t *testing.T) {
+	bin := buildTaskdBinary(t)
+	root := mcpTestRoot(t)
+	t.Cleanup(func() { stopMCPTestDaemon(t, root) })
+	ctx := context.Background()
+	transport := &mcp.CommandTransport{Command: exec.Command(bin, "mcp", "--root", root, "--harness", "codex")} //nolint:gosec // binary and arguments come from this test, without shell interpolation
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	cs, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	started, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "task_start", Arguments: map[string]any{"command": "sh", "args": []string{"-c", "sleep 3; exit 7"}}})
+	if err != nil || started.IsError {
+		t.Fatalf("start: %v %+v", err, started)
+	}
+	id := mcpDecodeStructured[daemon.StartResult](t, started).ID
+
+	fake := t.TempDir()
+	received := filepath.Join(fake, "received")
+	t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("NOTIFY_ARGS", received)
+	// A FIFO: the read below returns when the detached waiter's queue call
+	// writes and closes it.
+	if err := syscall.Mkfifo(received, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NOTIFY_ARGS\"\n"
+	if err := os.WriteFile(filepath.Join(fake, "codex"), []byte(script), 0o700); err != nil { //nolint:gosec // owner-only executable fixture for the fake CLI
+		t.Fatal(err)
+	}
+	delivered := make(chan []byte, 1)
+	go func() {
+		message, _ := os.ReadFile(received) //nolint:gosec // path belongs to this test temporary directory
+		delivered <- message
+	}()
+
+	// The log is a file, as in the instruction. A pipe would stay open in the
+	// detached child and hold this call until the task ended.
+	logPath := filepath.Join(fake, "wait.log")
+	logFile, err := os.Create(logPath) //nolint:gosec // path belongs to this test temporary directory
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread := "11111111-2222-3333-4444-555555555555"
+	cmd := exec.Command(bin, "wait", "--detach", "--root", root, "--id", id, "--until", "exit", "--notify-thread", thread) //nolint:gosec // binary and arguments come from this test, without shell interpolation
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	begun := time.Now()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("wait --detach: %v", err)
+	}
+	_ = logFile.Close()
+	if took := time.Since(begun); took > 2*time.Second {
+		t.Fatalf("wait --detach took %s, want it to return before the 3 s task ends", took)
+	}
+	logged, err := os.ReadFile(logPath) //nolint:gosec // path belongs to this test temporary directory
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	if _, err := fmt.Sscanf(string(logged), "taskd: detached waiter %d", &pid); err != nil {
+		t.Fatalf("no waiter pid in %q: %v", logged, err)
+	}
+	// ps reads the session on both Linux and macOS, where syscall has no Getsid.
+	sess, err := exec.Command("ps", "-o", "sess=", "-p", strconv.Itoa(pid)).Output() //nolint:gosec // pid is the waiter this test started
+	if err != nil || strings.TrimSpace(string(sess)) != strconv.Itoa(pid) {
+		t.Fatalf("waiter %d has session %q (%v), want it to lead its own session", pid, sess, err)
+	}
+
+	var message []byte
+	select {
+	case message = <-delivered:
+	case <-time.After(time.Minute):
+		t.Fatal("the detached waiter queued nothing within a minute")
+	}
+	for _, want := range []string{"queue\n--thread\n" + thread, `"exit_code":7`, id} {
+		if !strings.Contains(string(message), want) {
+			t.Errorf("missing %s in %s", want, message)
+		}
+	}
+}
+
+func TestDetachWithoutANotifyThreadIsAUsageError(t *testing.T) {
+	var out strings.Builder
+	if code := dispatch([]string{"wait", "--id", "abc", "--detach"}, &out); code != 2 {
+		t.Fatalf("exit = %d, want 2: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "--detach needs --notify-thread") {
+		t.Fatalf("output = %q", out.String())
 	}
 }
